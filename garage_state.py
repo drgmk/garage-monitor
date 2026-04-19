@@ -1,0 +1,355 @@
+"""State, event, and status-page layer for garage_monitor."""
+
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Mapping
+
+import garage_monitor as gm
+
+
+DEFAULT_AUTOMATION = {
+    "state_path": "garage_status.json",
+    "event_log_path": "garage_events.jsonl",
+    "html_status_path": "garage_status.html",
+    "notification_log_path": "garage_notifications.jsonl",
+    "transitions": {},
+    "scheduled_checks": [],
+}
+
+
+def resolve_path(path: str | Path, base_dir: Path) -> Path:
+    path = Path(path).expanduser()
+    return path if path.is_absolute() else base_dir / path
+
+
+def automation_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    out = dict(DEFAULT_AUTOMATION)
+    out.update(config.get("automation", {}) or {})
+    return out
+
+
+def read_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def write_json_atomic(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(gm.json_ready(data), indent=2, sort_keys=True) + "\n"
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+        handle.write(text)
+        tmp_path = Path(handle.name)
+    tmp_path.replace(path)
+
+
+def append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(gm.json_ready(record), sort_keys=True) + "\n")
+
+
+def bool_key(value: Any) -> str:
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    return "unknown"
+
+
+def state_label(key: str, value: Any) -> str:
+    if key == "garage_door_open":
+        return "open" if value is True else "closed" if value is False else "unknown"
+    if key == "car_present":
+        return "present" if value is True else "absent" if value is False else "unknown"
+    return bool_key(value)
+
+
+def transition_events(
+    previous_state: Mapping[str, Any] | None,
+    current_state: Mapping[str, Any],
+    rules: Mapping[str, Any],
+    now: datetime,
+) -> list[dict[str, Any]]:
+    if not previous_state:
+        return []
+
+    events = []
+    for key, key_rules in rules.items():
+        before = previous_state.get(key)
+        after = current_state.get(key)
+        if before is after or before == after:
+            continue
+
+        transition_key = f"{bool_key(before)}_to_{bool_key(after)}"
+        rule = (key_rules or {}).get(transition_key, {})
+        if not rule or not bool(rule.get("enabled", False)):
+            continue
+
+        events.append(
+            {
+                "created_at": now.isoformat(timespec="seconds"),
+                "kind": "transition",
+                "name": f"{key}.{transition_key}",
+                "entity": key,
+                "from": before,
+                "to": after,
+                "message": rule.get("message", f"{key} changed from {before} to {after}."),
+                "image_timestamp": current_state.get("timestamp"),
+                "filename": current_state.get("filename"),
+            }
+        )
+    return events
+
+
+def condition_matches(state: Mapping[str, Any], condition: Mapping[str, Any]) -> bool:
+    return all(state.get(key) == expected for key, expected in condition.items())
+
+
+def scheduled_events(
+    status_doc: Mapping[str, Any],
+    current_state: Mapping[str, Any],
+    checks: list[Mapping[str, Any]],
+    now: datetime,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    emitted = []
+    sent = dict(status_doc.get("scheduled_checks", {}).get("sent", {}))
+    today = now.date().isoformat()
+    current_hhmm = now.strftime("%H:%M")
+
+    for check in checks:
+        if not bool(check.get("enabled", True)):
+            continue
+
+        name = str(check["name"])
+        check_time = str(check["at"])
+        if current_hhmm < check_time:
+            continue
+        if sent.get(name) == today:
+            continue
+        if not condition_matches(current_state, check.get("condition", {})):
+            continue
+
+        emitted.append(
+            {
+                "created_at": now.isoformat(timespec="seconds"),
+                "kind": "scheduled_check",
+                "name": name,
+                "message": check.get("message", f"Scheduled garage check {name} matched."),
+                "condition": check.get("condition", {}),
+                "image_timestamp": current_state.get("timestamp"),
+                "filename": current_state.get("filename"),
+            }
+        )
+        sent[name] = today
+
+    return emitted, sent
+
+
+def render_status_html(status_doc: Mapping[str, Any]) -> str:
+    state = status_doc["state"]
+    events = status_doc.get("recent_events", [])
+
+    door = state_label("garage_door_open", state.get("garage_door_open"))
+    car = state_label("car_present", state.get("car_present"))
+    updated_at = html.escape(status_doc.get("updated_at", "unknown"))
+    image_timestamp = html.escape(str(state.get("timestamp", "unknown")))
+    filename = html.escape(str(state.get("filename", "unknown")))
+
+    rows = []
+    for event in events[-10:][::-1]:
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(event.get('created_at', '')))}</td>"
+            f"<td>{html.escape(str(event.get('kind', '')))}</td>"
+            f"<td>{html.escape(str(event.get('message', '')))}</td>"
+            "</tr>"
+        )
+
+    event_rows = "\n".join(rows) or '<tr><td colspan="3">No events recorded yet.</td></tr>'
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="60">
+  <title>Garage Status</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f4f6f8;
+      color: #1f2933;
+    }}
+    main {{
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 24px;
+    }}
+    h1 {{
+      font-size: 28px;
+      margin: 0 0 20px;
+    }}
+    .status {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }}
+    .tile {{
+      background: #ffffff;
+      border: 1px solid #d9e2ec;
+      border-radius: 8px;
+      padding: 16px;
+    }}
+    .label {{
+      color: #52606d;
+      font-size: 14px;
+      margin-bottom: 6px;
+    }}
+    .value {{
+      font-size: 30px;
+      font-weight: 700;
+      text-transform: capitalize;
+    }}
+    .meta, table {{
+      background: #ffffff;
+      border: 1px solid #d9e2ec;
+      border-radius: 8px;
+      padding: 16px;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      padding: 0;
+      overflow: hidden;
+    }}
+    th, td {{
+      border-bottom: 1px solid #d9e2ec;
+      padding: 10px;
+      text-align: left;
+      vertical-align: top;
+      font-size: 14px;
+    }}
+    th {{
+      color: #52606d;
+      font-weight: 600;
+    }}
+    tr:last-child td {{
+      border-bottom: 0;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Garage Status</h1>
+    <section class="status">
+      <div class="tile">
+        <div class="label">Garage door</div>
+        <div class="value">{html.escape(door)}</div>
+      </div>
+      <div class="tile">
+        <div class="label">Car</div>
+        <div class="value">{html.escape(car)}</div>
+      </div>
+    </section>
+    <section class="meta">
+      <p><strong>Updated:</strong> {updated_at}</p>
+      <p><strong>Image time:</strong> {image_timestamp}</p>
+      <p><strong>Image:</strong> {filename}</p>
+    </section>
+    <h2>Recent Events</h2>
+    <table>
+      <thead>
+        <tr><th>Time</th><th>Type</th><th>Message</th></tr>
+      </thead>
+      <tbody>
+        {event_rows}
+      </tbody>
+    </table>
+  </main>
+</body>
+</html>
+"""
+
+
+def update_status(config_path: Path, mode: str = "all") -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Path]]:
+    config = gm.load_config(config_path)
+    base_dir = config_path.parent
+    auto = automation_config(config)
+    paths = {
+        "state": resolve_path(auto["state_path"], base_dir),
+        "event_log": resolve_path(auto["event_log_path"], base_dir),
+        "html_status": resolve_path(auto["html_status_path"], base_dir),
+        "notification_log": resolve_path(auto["notification_log_path"], base_dir),
+    }
+
+    now = datetime.now()
+    previous_doc = read_json(paths["state"], default={})
+    previous_state = previous_doc.get("state")
+    current_state, _, _ = gm.state_from_config(config)
+
+    events = []
+    if mode in {"all", "transitions"}:
+        events.extend(transition_events(previous_state, current_state, auto.get("transitions", {}), now))
+
+    sent_checks = dict(previous_doc.get("scheduled_checks", {}).get("sent", {}))
+    if mode in {"all", "scheduled"}:
+        scheduled, sent_checks = scheduled_events(previous_doc, current_state, auto.get("scheduled_checks", []), now)
+        events.extend(scheduled)
+
+    previous_events = previous_doc.get("recent_events", [])
+    recent_events = (previous_events + events)[-25:]
+    status_doc = {
+        "updated_at": now.isoformat(timespec="seconds"),
+        "state": current_state,
+        "scheduled_checks": {"sent": sent_checks},
+        "recent_events": recent_events,
+    }
+
+    write_json_atomic(paths["state"], status_doc)
+    paths["html_status"].parent.mkdir(parents=True, exist_ok=True)
+    paths["html_status"].write_text(render_status_html(status_doc), encoding="utf-8")
+
+    for event in events:
+        append_jsonl(paths["event_log"], event)
+        append_jsonl(paths["notification_log"], {**event, "notification_status": "pending"})
+
+    return status_doc, events, paths
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Update garage status files and record notification-worthy events.")
+    parser.add_argument("--config", default=Path(__file__).with_name("garage_config.yml"), help="Path to YAML config")
+    parser.add_argument("--mode", choices=["all", "transitions", "scheduled"], default="all")
+    parser.add_argument("--format", choices=["json", "text"], default="text")
+    args = parser.parse_args(argv)
+
+    status_doc, events, paths = update_status(Path(args.config).expanduser(), mode=args.mode)
+
+    if args.format == "json":
+        print(json.dumps(gm.json_ready({"status": status_doc, "events": events, "paths": paths}), indent=2, sort_keys=True))
+        return 0
+
+    state = status_doc["state"]
+    print(f"status: garage_door={state_label('garage_door_open', state.get('garage_door_open'))}, car={state_label('car_present', state.get('car_present'))}")
+    print(f"status_json: {paths['state']}")
+    print(f"status_html: {paths['html_status']}")
+    if events:
+        print("notification candidates:")
+        for event in events:
+            print(f"- [{event['kind']}] {event['message']}")
+    else:
+        print("notification candidates: none")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

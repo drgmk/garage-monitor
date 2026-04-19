@@ -1,0 +1,11 @@
+# Example crontab entries for the Raspberry Pi.
+#
+# Copy this into `crontab -e` after adjusting paths and Python location.
+# The frequent job keeps garage_status.json/html fresh and catches transitions.
+
+*/5 * * * * cd /home/pi/garage && /usr/bin/python3 garage_state.py --config garage_config.yml >> garage_cron.log 2>&1
+
+# Optional: run scheduled checks from a separate explicit cron entry.
+# The default job above already evaluates scheduled checks when using --mode all.
+
+# 0 21 * * * cd /home/pi/garage && /usr/bin/python3 garage_state.py --config garage_config.yml --mode scheduled >> garage_cron.log 2>&1

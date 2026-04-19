@@ -1,0 +1,20 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Generated runtime state.
+garage_status.json
+garage_status.html
+garage_events.jsonl
+garage_notifications.jsonl
+garage_cron.log
+
+# Image and feature caches.
+binned/
+*_bin*.png
+features_*.pkl
+features_*.meta.json
+
+# Generated notebook execution artifacts.
+*.executed.ipynb
+*.refactored.executed.ipynb

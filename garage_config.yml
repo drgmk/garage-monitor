@@ -1,0 +1,57 @@
+data_path: /Volumes/usbshare1
+bin_factor: 4
+cache_dir_name: binned
+
+image_discovery:
+  force_rescan_images: false
+
+features:
+  force_recompute_features: false
+  max_images: null
+
+rois:
+  door: [400, 200, 525, 350]
+  gap_or_outside: [400, 500, 525, 375]
+  wall: [1050, 350, 1130, 125]
+  car_window: [80, 400, 180, 480]
+  car_door: [120, 520, 220, 620]
+
+conclusions:
+  garage_door_open:
+    feature: gap_to_wall_median
+    threshold: 2.0
+    higher_means_true: true
+  car_present:
+    feature: car_window_to_car_door_p90
+    threshold: 0.8
+    higher_means_true: false
+
+automation:
+  state_path: garage_status.json
+  event_log_path: garage_events.jsonl
+  html_status_path: garage_status.html
+  notification_log_path: garage_notifications.jsonl
+
+  transitions:
+    garage_door_open:
+      false_to_true:
+        enabled: true
+        message: Garage door opened.
+      true_to_false:
+        enabled: false
+        message: Garage door closed.
+    car_present:
+      true_to_false:
+        enabled: true
+        message: Car left the garage.
+      false_to_true:
+        enabled: true
+        message: Car is back in the garage.
+
+  scheduled_checks:
+    - name: garage_open_evening
+      at: "21:00"
+      enabled: true
+      condition:
+        garage_door_open: true
+      message: Garage door is still open.
