@@ -351,12 +351,46 @@ def normalize_roi(roi: tuple[int, int, int, int] | list[int]) -> tuple[int, int,
     return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
 
 
+def show_unavailable_image(path: str | Path, reason: Exception, ax: Any = None, title: str | None = None) -> Any:
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(10, 7))
+
+    path = Path(path)
+    ax.text(
+        0.5,
+        0.55,
+        "Image unavailable",
+        ha="center",
+        va="center",
+        fontsize=16,
+        weight="bold",
+        transform=ax.transAxes,
+    )
+    ax.text(
+        0.5,
+        0.45,
+        f"{path.name}\n{reason}",
+        ha="center",
+        va="center",
+        fontsize=10,
+        transform=ax.transAxes,
+    )
+    ax.set_axis_off()
+    ax.set_title(title or f"{path.name} unavailable")
+    return ax
+
+
 def show_image(path: str | Path, bin_factor: int | None = 4, ax: Any = None, title: str | None = None, cache_dir_name: str = DEFAULT_CACHE_DIR_NAME) -> Any:
     import matplotlib.pyplot as plt
 
     if ax is None:
         _, ax = plt.subplots(figsize=(10, 7))
-    img = load_luma(path, bin_factor=bin_factor, cache_dir_name=cache_dir_name)
+    try:
+        img = load_luma(path, bin_factor=bin_factor, cache_dir_name=cache_dir_name)
+    except Exception as exc:
+        return show_unavailable_image(path, exc, ax=ax, title=title)
     ax.imshow(img, cmap="gray")
     ax.set_axis_off()
     if title is not None:
@@ -374,9 +408,12 @@ def show_grid(
 ) -> Any:
     import matplotlib.pyplot as plt
 
-    img = load_luma(path, bin_factor=bin_factor, cache_dir_name=cache_dir_name)
     if ax is None:
         _, ax = plt.subplots(figsize=(12, 8))
+    try:
+        img = load_luma(path, bin_factor=bin_factor, cache_dir_name=cache_dir_name)
+    except Exception as exc:
+        return show_unavailable_image(path, exc, ax=ax)
     ax.imshow(img, cmap="gray")
     h, w = img.shape
     for x in range(0, w, step):
@@ -402,9 +439,12 @@ def draw_rois(
     import matplotlib.patches as patches
     import matplotlib.pyplot as plt
 
-    img = load_luma(path, bin_factor=bin_factor, cache_dir_name=cache_dir_name)
     if ax is None:
         _, ax = plt.subplots(figsize=(12, 8))
+    try:
+        img = load_luma(path, bin_factor=bin_factor, cache_dir_name=cache_dir_name)
+    except Exception as exc:
+        return show_unavailable_image(path, exc, ax=ax)
     ax.imshow(img, cmap="gray")
     for name, roi in rois.items():
         x0, y0, x1, y1 = normalize_roi(roi)
