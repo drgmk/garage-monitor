@@ -147,6 +147,15 @@ def latest_filename_timestamp(records: pd.DataFrame) -> datetime | None:
     return max(parsed)
 
 
+def concat_if_needed(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    frames = [frame for frame in frames if not frame.empty]
+    if not frames:
+        return pd.DataFrame()
+    if len(frames) == 1:
+        return frames[0].copy()
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
 def image_paths(
     root: str | Path,
     latest_known_ts: datetime | None = None,
@@ -243,7 +252,7 @@ def discover_images(
         )
 
     new_image_records = pd.DataFrame(records, columns=IMAGE_COLUMNS + ["image_key"])
-    images = new_image_records if force_rescan else pd.concat([cached_image_records, new_image_records], ignore_index=True, sort=False)
+    images = new_image_records if force_rescan else concat_if_needed([cached_image_records, new_image_records])
 
     if not images.empty:
         images["image_key"] = images.get("image_key", images["filename"]).astype(str)
@@ -653,7 +662,7 @@ def build_features(
     if not new_features.empty:
         new_features = add_candidate_features(new_features)
 
-    features = pd.concat([cached_features, new_features], ignore_index=True, sort=False)
+    features = concat_if_needed([cached_features, new_features])
     if not features.empty:
         features["image_key"] = features["image_key"].astype(str)
         features = features.sort_values("timestamp").drop_duplicates("image_key", keep="last").reset_index(drop=True)
