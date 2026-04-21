@@ -1,4 +1,4 @@
-data_path: /Volumes/usbshare1
+data_path: /Volumes/general/garage
 bin_factor: 4
 cache_dir_name: binned
 
@@ -10,20 +10,27 @@ features:
   max_images: null
 
 rois:
-  door: [400, 200, 525, 350]
-  gap_or_outside: [400, 500, 525, 375]
-  wall: [1050, 350, 1130, 125]
+  # first wall position
+  # door: [400, 200, 525, 350]
+  # gap_or_outside: [400, 500, 525, 375]
+  # wall: [1050, 350, 1130, 125]
+  # car_window: [80, 400, 180, 480]
+  # car_door: [120, 520, 220, 620]
+  # second wall position by wheel
+  door: [400, 150, 500, 250]
+  gap_or_outside: [450, 275, 550, 375]
+  wall: [960, 460, 1020, 350]
   car_window: [80, 400, 180, 480]
-  car_door: [120, 520, 220, 620]
+  car_door: [170, 520, 270, 620]
 
 conclusions:
   garage_door_open:
     feature: gap_to_wall_median
-    threshold: 2.0
+    threshold: 3
     higher_means_true: true
   car_present:
     feature: car_window_to_car_door_p90
-    threshold: 0.8
+    threshold: 0.82
     higher_means_true: false
 
 automation:
