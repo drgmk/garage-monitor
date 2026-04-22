@@ -114,6 +114,14 @@ def state_label(key: str, value: Any) -> str:
     return bool_key(value)
 
 
+def format_heading_time(value: Any) -> str:
+    try:
+        observed_at = datetime.fromisoformat(str(value))
+    except ValueError:
+        return "unknown time"
+    return observed_at.strftime("%H:%M on %a %-d %B")
+
+
 def transition_events(
     previous_state: Mapping[str, Any] | None,
     current_state: Mapping[str, Any],
@@ -282,9 +290,10 @@ def render_status_html(status_doc: Mapping[str, Any]) -> str:
 
     door = state_label("garage_door_open", state.get("garage_door_open"))
     car = state_label("car_present", state.get("car_present"))
-    updated_at = html.escape(status_doc.get("updated_at", "unknown"))
-    image_timestamp = html.escape(str(state.get("timestamp", "unknown")))
     filename = html.escape(str(state.get("filename", "unknown")))
+    heading_time = html.escape(format_heading_time(state.get("timestamp")))
+    door_class = "is-bad" if state.get("garage_door_open") is True else "is-good" if state.get("garage_door_open") is False else ""
+    car_class = "is-good" if state.get("car_present") is True else "is-bad" if state.get("car_present") is False else ""
 
     rows = []
     for event in events[-10:][::-1]:
@@ -302,7 +311,7 @@ def render_status_html(status_doc: Mapping[str, Any]) -> str:
         image_src = html.escape(str(latest_image["url"]))
         image_section = f"""
     <section class="latest-image">
-      <h2>Latest Image</h2>
+      <h2>Latest Image ({filename})</h2>
       <img src="{image_src}" alt="Latest binned garage camera image">
     </section>
 """
@@ -328,6 +337,7 @@ def render_status_html(status_doc: Mapping[str, Any]) -> str:
     h1 {{
       font-size: 28px;
       margin: 0 0 20px;
+      line-height: 1.2;
     }}
     .status {{
       display: grid;
@@ -341,6 +351,14 @@ def render_status_html(status_doc: Mapping[str, Any]) -> str:
       border-radius: 8px;
       padding: 16px;
     }}
+    .tile.is-good {{
+      background: #dff3e6;
+      border-color: #a8d8b9;
+    }}
+    .tile.is-bad {{
+      background: #f8dddd;
+      border-color: #e4a6a6;
+    }}
     .label {{
       color: #52606d;
       font-size: 14px;
@@ -351,7 +369,7 @@ def render_status_html(status_doc: Mapping[str, Any]) -> str:
       font-weight: 700;
       text-transform: capitalize;
     }}
-    .meta, table {{
+    table {{
       background: #ffffff;
       border: 1px solid #d9e2ec;
       border-radius: 8px;
@@ -392,21 +410,16 @@ def render_status_html(status_doc: Mapping[str, Any]) -> str:
 </head>
 <body>
   <main>
-    <h1>Garage Status</h1>
+    <h1>Garage Status at {heading_time}</h1>
     <section class="status">
-      <div class="tile">
+      <div class="tile {door_class}">
         <div class="label">Garage door</div>
         <div class="value">{html.escape(door)}</div>
       </div>
-      <div class="tile">
+      <div class="tile {car_class}">
         <div class="label">Car</div>
         <div class="value">{html.escape(car)}</div>
       </div>
-    </section>
-    <section class="meta">
-      <p><strong>Updated:</strong> {updated_at}</p>
-      <p><strong>Image time:</strong> {image_timestamp}</p>
-      <p><strong>Image:</strong> {filename}</p>
     </section>
     {image_section}
     <h2>Recent Events</h2>
