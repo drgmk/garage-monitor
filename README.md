@@ -10,7 +10,7 @@ configured regions of interest, and reports:
 
 The state layer writes current status files, records transition events, and
 generates a small HTML page that can be viewed from a phone over Tailscale.
-Actual notification delivery is intentionally left as a later hook.
+Notifications are sent through ntfy when configured.
 
 ## Files
 
@@ -39,6 +39,18 @@ python garage_state.py --config garage_config.yml
 `garage_latest_binned.png` is a symlink to the latest cached binned image so the
 status page can show the same image that was scored. These generated files are
 ignored by git.
+
+## Notifications
+
+`garage_state.py` sends notifications for transition and scheduled-check events
+when `automation.notifications.enabled` is true. The default config reads the
+ntfy topic URL from `GARAGE_NTFY_URL` so the private topic does not need to be
+committed:
+
+```bash
+export GARAGE_NTFY_URL=https://ntfy.sh/your-private-topic
+python garage_state.py --config garage_config.yml
+```
 
 ## Phone Status Page
 

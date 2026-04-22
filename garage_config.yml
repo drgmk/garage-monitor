@@ -40,6 +40,13 @@ automation:
   latest_binned_image_path: garage_latest_binned.png
   notification_log_path: garage_notifications.jsonl
 
+  notifications:
+    enabled: true
+    provider: ntfy
+    url_env: GARAGE_NTFY_URL
+    title: Garage
+    tags: [garage]
+
   transitions:
     garage_door_open:
       false_to_true:

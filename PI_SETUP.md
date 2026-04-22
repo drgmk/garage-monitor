@@ -1,9 +1,8 @@
 # Garage Monitor Pi Setup
 
 This directory is intended to be copied to the Raspberry Pi that can see the
-camera image directory. The notification provider is intentionally not wired up
-yet; `garage_state.py` records notification-worthy events in JSONL so a sender
-can be added later.
+camera image directory. `garage_state.py` can send notification-worthy events to
+ntfy and records each attempted notification in JSONL.
 
 ## Files
 
@@ -61,6 +60,7 @@ python garage_state.py --config garage_config.yml --format json
 Run the detector frequently to keep current state fresh and catch transitions:
 
 ```cron
+GARAGE_NTFY_URL=https://ntfy.sh/your-private-topic
 */5 * * * * cd /home/pi/garage && /usr/bin/python3 garage_state.py --config garage_config.yml >> garage_cron.log 2>&1
 ```
 
@@ -93,8 +93,7 @@ For a persistent setup, run the HTTP server with systemd, nginx, Caddy, or any
 other small web server you already use. No public port forwarding is needed if
 you access it through Tailscale.
 
-## Notification Hook Later
+## Notifications
 
 `garage_notifications.jsonl` receives one JSON object per notification-worthy
-event. A later sender can tail or drain this file and post to ntfy, Pushover,
-Telegram, Slack, or Home Assistant.
+event with `notification_status` set to `sent`, `failed`, or `skipped`.

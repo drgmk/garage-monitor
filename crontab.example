@@ -1,0 +1,13 @@
+# Example crontab for the Raspberry Pi.
+#
+# Replace paths, Python location, and GARAGE_NTFY_URL for the Pi.
+# Keep the real ntfy topic out of git if this repo is public.
+
+GARAGE_NTFY_URL=https://ntfy.sh/your-private-topic
+
+*/5 * * * * TS=$(date +\%Y\%m\%d_\%H\%M\%S); rpicam-still -n --framerate 0 -t 5000 --ev 1 --exposure custom --tuning-file /home/grant/garage-monitor/imx708_noir.json --vflip --hflip -o /home/grant/garage-images/img_${TS}.png > rpicam-still_cron.log 2>&1 && cp /home/grant/garage-images/img_${TS}.png /home/grant/nas_web/img.png && cd /home/grant/garage-monitor && /home/grant/.venv/bin/python garage_state.py >> garage_cron.log 2>&1
+1 * * * * rsync -auv /home/grant/garage-images/ /home/grant/nas/garage/ --no-group --omit-dir-times --no-perms --no-times --exclude='features_*'
+
+# Optional cleanup examples.
+# 1 2 * * * find /home/grant/garage-images -type f -name "img_*.png" -mtime +100 -delete
+# 1 1 1 * * find /home/grant/garage-images/binned -type f -name "img_*.png" -mtime +1000 -delete

@@ -7,6 +7,8 @@ import html
 import json
 import os
 import tempfile
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -20,6 +22,15 @@ DEFAULT_AUTOMATION = {
     "html_status_path": "garage_status.html",
     "latest_binned_image_path": "garage_latest_binned.png",
     "notification_log_path": "garage_notifications.jsonl",
+    "notifications": {
+        "enabled": False,
+        "provider": "ntfy",
+        "url": None,
+        "url_env": "GARAGE_NTFY_URL",
+        "timeout_seconds": 10,
+        "title": "Garage",
+        "tags": ["garage"],
+    },
     "transitions": {},
     "scheduled_checks": [],
 }
@@ -33,6 +44,9 @@ def resolve_path(path: str | Path, base_dir: Path) -> Path:
 def automation_config(config: Mapping[str, Any]) -> dict[str, Any]:
     out = dict(DEFAULT_AUTOMATION)
     out.update(config.get("automation", {}) or {})
+    notifications = dict(DEFAULT_AUTOMATION["notifications"])
+    notifications.update(out.get("notifications") or {})
+    out["notifications"] = notifications
     return out
 
 
@@ -179,6 +193,86 @@ def scheduled_events(
         sent[name] = today
 
     return emitted, sent
+
+
+def notification_url(notification_config: Mapping[str, Any]) -> str | None:
+    url = notification_config.get("url")
+    if url:
+        return str(url)
+    url_env = notification_config.get("url_env")
+    if url_env:
+        return os.environ.get(str(url_env))
+    return None
+
+
+def ntfy_message(event: Mapping[str, Any], state: Mapping[str, Any]) -> str:
+    lines = [
+        str(event.get("message", "Garage status changed.")),
+        f"Door: {state_label('garage_door_open', state.get('garage_door_open'))}",
+        f"Car: {state_label('car_present', state.get('car_present'))}",
+    ]
+    image_timestamp = event.get("image_timestamp")
+    if image_timestamp:
+        lines.append(f"Image time: {image_timestamp}")
+    return "\n".join(lines)
+
+
+def send_ntfy_notification(
+    event: Mapping[str, Any],
+    state: Mapping[str, Any],
+    notification_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    url = notification_url(notification_config)
+    if not url:
+        return {"notification_status": "skipped", "reason": "missing ntfy url"}
+
+    title = str(notification_config.get("title") or "Garage")
+    tags = notification_config.get("tags") or []
+    if isinstance(tags, str):
+        tags = [tags]
+    timeout = float(notification_config.get("timeout_seconds", 10))
+
+    headers = {
+        "Title": title,
+        "Tags": ",".join(str(tag) for tag in tags),
+    }
+    request = urllib.request.Request(
+        url,
+        data=ntfy_message(event, state).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response_body = response.read().decode("utf-8", errors="replace")
+        return {
+            "notification_status": "sent",
+            "provider": "ntfy",
+            "status_code": response.status,
+            "response": response_body,
+        }
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {
+            "notification_status": "failed",
+            "provider": "ntfy",
+            "reason": str(exc),
+        }
+
+
+def send_notification(
+    event: Mapping[str, Any],
+    state: Mapping[str, Any],
+    notification_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not bool(notification_config.get("enabled", False)):
+        return {"notification_status": "skipped", "reason": "notifications disabled"}
+
+    provider = str(notification_config.get("provider", "ntfy")).lower()
+    if provider != "ntfy":
+        return {"notification_status": "skipped", "reason": f"unsupported provider: {provider}"}
+
+    return send_ntfy_notification(event, state, notification_config)
 
 
 def render_status_html(status_doc: Mapping[str, Any]) -> str:
@@ -380,9 +474,11 @@ def update_status(config_path: Path, mode: str = "all") -> tuple[dict[str, Any],
     paths["html_status"].parent.mkdir(parents=True, exist_ok=True)
     paths["html_status"].write_text(render_status_html(status_doc), encoding="utf-8")
 
+    notification_config = auto.get("notifications", {})
     for event in events:
         append_jsonl(paths["event_log"], event)
-        append_jsonl(paths["notification_log"], {**event, "notification_status": "pending"})
+        notification_result = send_notification(event, current_state, notification_config)
+        append_jsonl(paths["notification_log"], {**event, **notification_result})
 
     return status_doc, events, paths
 
