@@ -5,7 +5,7 @@
 
 GARAGE_NTFY_URL=https://ntfy.sh/your-private-topic
 
-*/5 * * * * TS=$(date +\%Y\%m\%d_\%H\%M\%S); rpicam-still -n --framerate 0 -t 5000 --ev 1 --exposure custom --tuning-file /home/grant/garage-monitor/imx708_noir.json --vflip --hflip -o /home/grant/garage-images/img_${TS}.png > rpicam-still_cron.log 2>&1 && cp /home/grant/garage-images/img_${TS}.png /home/grant/nas_web/img.png && cd /home/grant/garage-monitor && /home/grant/.venv/bin/python garage_state.py >> garage_cron.log 2>&1
+*/5 * * * * TS=$(date +\%Y\%m\%d_\%H\%M\%S); rpicam-still -n --framerate 0 -t 5000 --ev 1 --exposure custom --tuning-file /home/grant/garage-monitor/imx708_noir.json --vflip --hflip -o /home/grant/garage-images/img_${TS}.png > rpicam-still_cron.log 2>&1 && cd /home/grant/garage-monitor && /home/grant/.venv/bin/python garage_state.py >> garage_cron.log 2>&1 && cp /home/grant/garage-images/img_${TS}.png /home/grant/nas_web/img.png
 1 * * * * rsync -auv /home/grant/garage-images/ /home/grant/nas/garage/ --no-group --omit-dir-times --no-perms --no-times --exclude='features_*'
 
 # Optional cleanup examples.
