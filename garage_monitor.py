@@ -127,7 +127,8 @@ def load_cached_image_records(
         out["path"] = out["filename"].map(lambda name: Path(data_path) / name)
 
     if "timestamp" in cached.columns:
-        out["timestamp"] = np.array(pd.to_datetime(cached["timestamp"]).dt.to_pydatetime())
+        timestamps = pd.to_datetime(cached["timestamp"])
+        out["timestamp"] = [None if pd.isna(ts) else ts.to_pydatetime() for ts in timestamps]
     else:
         out["timestamp"] = out["filename"].map(parse_timestamp_from_filename)
 
