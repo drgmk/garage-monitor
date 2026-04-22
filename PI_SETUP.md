@@ -12,6 +12,7 @@ can be added later.
 - `garage_config.yml`: paths, ROIs, thresholds, and automation rules.
 - `garage_status.json`: generated current status for scripts.
 - `garage_status.html`: generated phone-friendly status page.
+- `garage_latest_binned.png`: generated symlink to the latest cached binned image.
 - `garage_events.jsonl`: generated event history.
 - `garage_notifications.jsonl`: generated pending notification records.
 

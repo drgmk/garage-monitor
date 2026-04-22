@@ -32,10 +32,13 @@ python garage_state.py --config garage_config.yml
 
 - `garage_status.json`
 - `garage_status.html`
+- `garage_latest_binned.png`
 - `garage_events.jsonl`
 - `garage_notifications.jsonl`
 
-These generated files are ignored by git.
+`garage_latest_binned.png` is a symlink to the latest cached binned image so the
+status page can show the same image that was scored. These generated files are
+ignored by git.
 
 ## Phone Status Page
 

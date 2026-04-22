@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ DEFAULT_AUTOMATION = {
     "state_path": "garage_status.json",
     "event_log_path": "garage_events.jsonl",
     "html_status_path": "garage_status.html",
+    "latest_binned_image_path": "garage_latest_binned.png",
     "notification_log_path": "garage_notifications.jsonl",
     "transitions": {},
     "scheduled_checks": [],
@@ -54,6 +56,32 @@ def append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(gm.json_ready(record), sort_keys=True) + "\n")
+
+
+def update_symlink(link_path: Path, target_path: Path) -> None:
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = link_path.with_name(f".{link_path.name}.tmp")
+    if tmp_path.exists() or tmp_path.is_symlink():
+        tmp_path.unlink()
+    tmp_path.symlink_to(target_path)
+    os.replace(tmp_path, link_path)
+
+
+def latest_binned_image_path(config: Mapping[str, Any], state: Mapping[str, Any]) -> Path | None:
+    source_path = state.get("path")
+    if not source_path:
+        return None
+
+    binned_path = gm.binned_image_path(
+        source_path,
+        bin_factor=config.get("bin_factor", 4),
+        cache_dir_name=config.get("cache_dir_name", gm.DEFAULT_CACHE_DIR_NAME),
+    )
+    return binned_path if binned_path.exists() else None
+
+
+def relative_url(path: Path, base_path: Path) -> str:
+    return Path(os.path.relpath(path, start=base_path.parent)).as_posix()
 
 
 def bool_key(value: Any) -> str:
@@ -156,6 +184,7 @@ def scheduled_events(
 def render_status_html(status_doc: Mapping[str, Any]) -> str:
     state = status_doc["state"]
     events = status_doc.get("recent_events", [])
+    latest_image = status_doc.get("latest_binned_image")
 
     door = state_label("garage_door_open", state.get("garage_door_open"))
     car = state_label("car_present", state.get("car_present"))
@@ -174,6 +203,15 @@ def render_status_html(status_doc: Mapping[str, Any]) -> str:
         )
 
     event_rows = "\n".join(rows) or '<tr><td colspan="3">No events recorded yet.</td></tr>'
+    image_section = ""
+    if latest_image:
+        image_src = html.escape(str(latest_image["url"]))
+        image_section = f"""
+    <section class="latest-image">
+      <h2>Latest Image</h2>
+      <img src="{image_src}" alt="Latest binned garage camera image">
+    </section>
+"""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -245,6 +283,17 @@ def render_status_html(status_doc: Mapping[str, Any]) -> str:
     tr:last-child td {{
       border-bottom: 0;
     }}
+    .latest-image {{
+      margin: 20px 0;
+    }}
+    .latest-image img {{
+      display: block;
+      width: 100%;
+      height: auto;
+      border: 1px solid #d9e2ec;
+      border-radius: 8px;
+      background: #ffffff;
+    }}
   </style>
 </head>
 <body>
@@ -265,6 +314,7 @@ def render_status_html(status_doc: Mapping[str, Any]) -> str:
       <p><strong>Image time:</strong> {image_timestamp}</p>
       <p><strong>Image:</strong> {filename}</p>
     </section>
+    {image_section}
     <h2>Recent Events</h2>
     <table>
       <thead>
@@ -288,6 +338,7 @@ def update_status(config_path: Path, mode: str = "all") -> tuple[dict[str, Any],
         "state": resolve_path(auto["state_path"], base_dir),
         "event_log": resolve_path(auto["event_log_path"], base_dir),
         "html_status": resolve_path(auto["html_status_path"], base_dir),
+        "latest_binned_image": resolve_path(auto["latest_binned_image_path"], base_dir),
         "notification_log": resolve_path(auto["notification_log_path"], base_dir),
     }
 
@@ -305,11 +356,22 @@ def update_status(config_path: Path, mode: str = "all") -> tuple[dict[str, Any],
         scheduled, sent_checks = scheduled_events(previous_doc, current_state, auto.get("scheduled_checks", []), now)
         events.extend(scheduled)
 
+    latest_binned = latest_binned_image_path(config, current_state)
+    latest_image = None
+    if latest_binned is not None:
+        update_symlink(paths["latest_binned_image"], latest_binned)
+        latest_image = {
+            "path": paths["latest_binned_image"],
+            "target": latest_binned,
+            "url": relative_url(paths["latest_binned_image"], paths["html_status"]),
+        }
+
     previous_events = previous_doc.get("recent_events", [])
     recent_events = (previous_events + events)[-25:]
     status_doc = {
         "updated_at": now.isoformat(timespec="seconds"),
         "state": current_state,
+        "latest_binned_image": latest_image,
         "scheduled_checks": {"sent": sent_checks},
         "recent_events": recent_events,
     }

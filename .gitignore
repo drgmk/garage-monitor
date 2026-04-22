@@ -5,6 +5,7 @@ __pycache__/
 # Generated runtime state.
 garage_status.json
 garage_status.html
+garage_latest_binned.png
 garage_events.jsonl
 garage_notifications.jsonl
 garage_cron.log

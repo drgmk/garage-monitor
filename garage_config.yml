@@ -37,6 +37,7 @@ automation:
   state_path: garage_status.json
   event_log_path: garage_events.jsonl
   html_status_path: garage_status.html
+  latest_binned_image_path: garage_latest_binned.png
   notification_log_path: garage_notifications.jsonl
 
   transitions:
