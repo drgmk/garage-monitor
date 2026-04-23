@@ -38,6 +38,16 @@ IMAGE_COLUMNS = [
 
 ROI_STATS = ["mean", "median", "std", "p10", "p25", "p75", "p90", "p95"]
 
+BAND_MASK_ROW_DELTA_ABS_FLOOR = 25.0
+BAND_MASK_ROW_DELTA_ROBUST_Z = 8.0
+BAND_MASK_EVIDENCE_WINDOW = 9
+BAND_MASK_EVIDENCE_MIN_COUNT = 1
+BAND_MASK_DILATION_RADIUS = 1
+BAND_MASK_FILL_GAP = 13
+BAND_MASK_MIN_RUN_LEN = 2
+BAND_MASK_MIN_FRACTION_TO_APPLY = 0.05
+BAND_MASK_LOCAL_WINDOW = 25
+
 BIN_CACHE_WARNINGS: list[dict[str, Any]] = []
 BIN_CACHE_HITS = 0
 BIN_CACHE_MISSES = 0
@@ -361,6 +371,111 @@ def normalize_roi(roi: tuple[int, int, int, int] | list[int]) -> tuple[int, int,
     return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
 
 
+def rolling_count(mask: np.ndarray, window: int) -> np.ndarray:
+    return np.convolve(np.asarray(mask, dtype=float), np.ones(window), mode="same")
+
+
+def row_metrics_luma(image: np.ndarray, local_window: int = BAND_MASK_LOCAL_WINDOW) -> pd.DataFrame:
+    image = np.asarray(image, dtype=np.float32)
+    row_lum_median = np.median(image, axis=1)
+    local_baseline = (
+        pd.Series(row_lum_median).rolling(local_window, center=True, min_periods=1).median().to_numpy()
+    )
+    return pd.DataFrame(
+        {
+            "y": np.arange(image.shape[0]),
+            "lum_median": row_lum_median,
+            "lum_iqr": np.percentile(image, 75, axis=1) - np.percentile(image, 25, axis=1),
+            "black_fraction": (image < 8).mean(axis=1),
+            "white_fraction": (image > 220).mean(axis=1),
+            "row_delta": np.r_[0, np.abs(np.diff(row_lum_median))],
+            "abs_local_residual": np.abs(row_lum_median - local_baseline),
+        }
+    )
+
+
+def dilate_row_mask(mask: np.ndarray, radius: int = BAND_MASK_DILATION_RADIUS) -> np.ndarray:
+    mask = np.asarray(mask, dtype=bool)
+    out = mask.copy()
+    for shift in range(1, radius + 1):
+        out[:-shift] |= mask[shift:]
+        out[shift:] |= mask[:-shift]
+    return out
+
+
+def fill_small_gaps(mask: np.ndarray, max_gap: int = BAND_MASK_FILL_GAP) -> np.ndarray:
+    out = np.asarray(mask, dtype=bool).copy()
+    i = 0
+    while i < len(out):
+        if out[i]:
+            i += 1
+            continue
+        start = i
+        while i < len(out) and not out[i]:
+            i += 1
+        if start > 0 and i < len(out) and i - start <= max_gap:
+            out[start:i] = True
+    return out
+
+
+def remove_small_runs(mask: np.ndarray, min_len: int = BAND_MASK_MIN_RUN_LEN) -> np.ndarray:
+    out = np.asarray(mask, dtype=bool).copy()
+    i = 0
+    while i < len(out):
+        if not out[i]:
+            i += 1
+            continue
+        start = i
+        while i < len(out) and out[i]:
+            i += 1
+        if i - start < min_len:
+            out[start:i] = False
+    return out
+
+
+def robust_binned_row_band_mask(image: np.ndarray) -> dict[str, Any]:
+    df = row_metrics_luma(image)
+    row_delta = df["row_delta"].to_numpy()
+    median = float(np.median(row_delta))
+    mad = float(np.median(np.abs(row_delta - median)))
+    scale = 1.4826 * mad if mad > 0 else max(float(np.std(row_delta)), 1.0)
+
+    edge_seed = (row_delta > BAND_MASK_ROW_DELTA_ABS_FLOOR) & (
+        (row_delta - median) / (scale + 1e-6) > BAND_MASK_ROW_DELTA_ROBUST_Z
+    )
+    flat_seed = (
+        (df["lum_iqr"] < 8) & ((df["black_fraction"] > 0.5) | (df["white_fraction"] > 0.5))
+    ).to_numpy()
+    seeds = edge_seed | flat_seed
+    evidence = rolling_count(seeds, BAND_MASK_EVIDENCE_WINDOW) >= BAND_MASK_EVIDENCE_MIN_COUNT
+    band = dilate_row_mask(evidence, radius=BAND_MASK_DILATION_RADIUS)
+    band = fill_small_gaps(band, max_gap=BAND_MASK_FILL_GAP)
+    band = remove_small_runs(band, min_len=BAND_MASK_MIN_RUN_LEN)
+
+    return {
+        "edge_seed": edge_seed,
+        "flat_seed": flat_seed,
+        "seeds": seeds,
+        "evidence": evidence,
+        "band": band,
+        "band_fraction": float(np.mean(band)),
+        "row_delta_max": float(np.max(row_delta)),
+        "row_delta_median": median,
+        "row_delta_mad": mad,
+        "row_delta_scale": scale,
+    }
+
+
+def mask_banded_rows(image: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+    band_info = robust_binned_row_band_mask(image)
+    masked = np.asarray(image, dtype=np.float32).copy()
+    apply_mask = band_info["band_fraction"] >= BAND_MASK_MIN_FRACTION_TO_APPLY
+    if apply_mask:
+        masked[band_info["band"], :] = np.nan
+    band_info["applied"] = bool(apply_mask)
+    return masked, band_info
+
+
 def show_unavailable_image(path: str | Path, reason: Exception, ax: Any = None, title: str | None = None) -> Any:
     import matplotlib.pyplot as plt
 
@@ -475,7 +590,8 @@ def roi_values(image: np.ndarray, roi: tuple[int, int, int, int] | list[int]) ->
     y1 = max(0, min(h, int(y1)))
     if x1 <= x0 or y1 <= y0:
         return np.array([], dtype=float)
-    return image[y0:y1, x0:x1].ravel()
+    vals = image[y0:y1, x0:x1].ravel()
+    return vals[np.isfinite(vals)]
 
 
 def roi_stats_for_image(
@@ -485,7 +601,12 @@ def roi_stats_for_image(
     cache_dir_name: str = DEFAULT_CACHE_DIR_NAME,
 ) -> dict[str, float | int]:
     img = load_luma(path, bin_factor=bin_factor, cache_dir_name=cache_dir_name)
+    img, band_info = mask_banded_rows(img)
     out = {}
+    out["band_mask_rows"] = int(np.sum(band_info["band"]))
+    out["band_mask_fraction"] = float(band_info["band_fraction"])
+    out["band_mask_applied"] = bool(band_info["applied"])
+    out["band_mask_row_delta_max"] = float(band_info["row_delta_max"])
     for name, roi in rois.items():
         vals = roi_values(img, roi)
         if vals.size == 0:
@@ -494,11 +615,11 @@ def roi_stats_for_image(
                 out[f"{name}_{stat}"] = np.nan
             continue
         out[f"{name}_n"] = vals.size
-        out[f"{name}_mean"] = float(np.mean(vals))
-        out[f"{name}_median"] = float(np.median(vals))
-        out[f"{name}_std"] = float(np.std(vals))
+        out[f"{name}_mean"] = float(np.nanmean(vals))
+        out[f"{name}_median"] = float(np.nanmedian(vals))
+        out[f"{name}_std"] = float(np.nanstd(vals))
         for q in [10, 25, 75, 90, 95]:
-            out[f"{name}_p{q}"] = float(np.percentile(vals, q))
+            out[f"{name}_p{q}"] = float(np.nanpercentile(vals, q))
     return out
 
 

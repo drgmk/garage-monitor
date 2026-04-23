@@ -311,7 +311,7 @@ def render_status_html(status_doc: Mapping[str, Any]) -> str:
         image_src = html.escape(str(latest_image["url"]))
         image_section = f"""
     <section class="latest-image">
-      <h2>Latest Image ({filename})</h2>
+      <h2>Last Image ({filename})</h2>
       <img src="{image_src}" alt="Latest binned garage camera image">
     </section>
 """
@@ -410,7 +410,7 @@ def render_status_html(status_doc: Mapping[str, Any]) -> str:
 </head>
 <body>
   <main>
-    <h1>Garage Status at {heading_time}</h1>
+    <h1>Status at {heading_time}</h1>
     <section class="status">
       <div class="tile {door_class}">
         <div class="label">Garage door</div>

@@ -26,11 +26,11 @@ rois:
 conclusions:
   garage_door_open:
     feature: gap_to_wall_median
-    threshold: 3
+    threshold: 3.5
     higher_means_true: true
   car_present:
     feature: car_window_to_car_door_p90
-    threshold: 0.82
+    threshold: 0.85
     higher_means_true: false
 
 automation:
