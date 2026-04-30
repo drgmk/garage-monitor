@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import yaml
 from PIL import ExifTags, Image
+from scipy import ndimage
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -47,6 +48,13 @@ BAND_MASK_FILL_GAP = 13
 BAND_MASK_MIN_RUN_LEN = 2
 BAND_MASK_MIN_FRACTION_TO_APPLY = 0.05
 BAND_MASK_LOCAL_WINDOW = 25
+
+DOOR_PROFILE_ROTATE_CW_DEG = -1.0
+DOOR_PROFILE_EDGE_DIVISOR = 6
+DOOR_PROFILE_EDGE_MARGIN_DIVISOR = 12
+DOOR_PROFILE_CENTER1 = (21, 30)
+DOOR_PROFILE_CENTER2 = (18, 20)
+FEATURE_CACHE_SCHEMA_VERSION = 2
 
 BIN_CACHE_WARNINGS: list[dict[str, Any]] = []
 BIN_CACHE_HITS = 0
@@ -594,11 +602,82 @@ def roi_values(image: np.ndarray, roi: tuple[int, int, int, int] | list[int]) ->
     return vals[np.isfinite(vals)]
 
 
+def roi_crop(image: np.ndarray, roi: tuple[int, int, int, int] | list[int]) -> np.ndarray:
+    x0, y0, x1, y1 = normalize_roi(roi)
+    h, w = image.shape[:2]
+    x0 = max(0, min(w, int(x0)))
+    x1 = max(0, min(w, int(x1)))
+    y0 = max(0, min(h, int(y0)))
+    y1 = max(0, min(h, int(y1)))
+    if x1 <= x0 or y1 <= y0:
+        return np.empty((0, 0), dtype=np.float32)
+    return np.asarray(image[y0:y1, x0:x1], dtype=np.float32)
+
+
+def rotated_roi_crop(
+    image: np.ndarray,
+    roi: tuple[int, int, int, int] | list[int],
+    rotate_cw_deg: float = DOOR_PROFILE_ROTATE_CW_DEG,
+) -> np.ndarray:
+    crop = roi_crop(image, roi)
+    if crop.size == 0 or rotate_cw_deg == 0:
+        return crop
+    return ndimage.rotate(crop, angle=rotate_cw_deg, reshape=False, order=1, mode="constant", cval=np.nan)
+
+
+def door_line_residual_metrics(
+    image: np.ndarray,
+    roi: tuple[int, int, int, int] | list[int],
+    rotate_cw_deg: float = DOOR_PROFILE_ROTATE_CW_DEG,
+) -> dict[str, float]:
+    empty = {
+        "door_line_resid_sum": np.nan,
+        "door_line_resid_ssq": np.nan,
+        "door_profile_valid_fraction": np.nan,
+    }
+    crop = rotated_roi_crop(image, roi, rotate_cw_deg=rotate_cw_deg)
+    if crop.size == 0 or not np.isfinite(crop).any():
+        return empty
+
+    valid_cols = np.isfinite(crop).any(axis=0)
+    crop = crop[:, valid_cols]
+    if crop.shape[1] < 30:
+        return empty
+
+    profile = np.nanmean(crop, axis=0)
+    n = profile.size
+    edge_n = max(3, n // DOOR_PROFILE_EDGE_DIVISOR)
+    edge_margin = max(2, n // DOOR_PROFILE_EDGE_MARGIN_DIVISOR)
+    left_start = edge_margin
+    left_end = min(n, edge_margin + edge_n)
+    right_end = max(0, n - edge_margin)
+    right_start = max(0, right_end - edge_n)
+    if right_start <= left_end:
+        return empty
+
+    fit_segment = profile[left_end:right_start]
+    if fit_segment.size < 3:
+        return empty
+
+    x_fit = np.arange(left_end, right_start, dtype=np.float32)
+    y_fit = fit_segment - float(np.nanmean(fit_segment))
+    slope, intercept = np.polyfit(x_fit, y_fit, deg=1)
+    fitted = slope * x_fit + intercept
+    residual = y_fit - fitted
+
+    return {
+        "door_line_resid_sum": float(np.nansum(np.abs(residual))),
+        "door_line_resid_ssq": float(np.nansum(residual ** 2)),
+        "door_profile_valid_fraction": float(np.mean(np.isfinite(crop))),
+    }
+
+
 def roi_stats_for_image(
     path: str | Path,
     rois: Mapping[str, tuple[int, int, int, int] | list[int]],
     bin_factor: int | None = 4,
     cache_dir_name: str = DEFAULT_CACHE_DIR_NAME,
+    door_profile_rotate_cw_deg: float = DOOR_PROFILE_ROTATE_CW_DEG,
 ) -> dict[str, float | int]:
     img = load_luma(path, bin_factor=bin_factor, cache_dir_name=cache_dir_name)
     img, band_info = mask_banded_rows(img)
@@ -620,6 +699,9 @@ def roi_stats_for_image(
         out[f"{name}_std"] = float(np.nanstd(vals))
         for q in [10, 25, 75, 90, 95]:
             out[f"{name}_p{q}"] = float(np.nanpercentile(vals, q))
+
+    if "door" in rois:
+        out.update(door_line_residual_metrics(img, rois["door"], rotate_cw_deg=door_profile_rotate_cw_deg))
     return out
 
 
@@ -642,9 +724,6 @@ def add_candidate_features(df: pd.DataFrame) -> pd.DataFrame:
     add_difference_feature(out, "door_median", "wall_median", "door_minus_wall_median")
 
     add_ratio_feature(out, "gap_or_outside_median", "wall_median", "gap_to_wall_median")
-    add_difference_feature(out, "gap_or_outside_median", "wall_median", "gap_minus_wall_median")
-    add_ratio_feature(out, "gap_or_outside_p90", "wall_median", "gap_p90_to_wall_median")
-    add_ratio_feature(out, "gap_or_outside_p95", "door_median", "gap_p95_to_door_median")
 
     add_ratio_feature(out, "car_window_median", "car_door_median", "car_window_to_car_door_median")
     add_ratio_feature(out, "car_door_median", "car_window_median", "car_door_to_car_window_median")
@@ -664,10 +743,16 @@ def normalized_rois_for_cache(rois: Mapping[str, tuple[int, int, int, int] | lis
     return {name: [int(v) for v in normalize_roi(roi)] for name, roi in rois.items()}
 
 
-def feature_cache_metadata(rois: Mapping[str, tuple[int, int, int, int] | list[int]], bin_factor: int | None) -> dict[str, Any]:
+def feature_cache_metadata(
+    rois: Mapping[str, tuple[int, int, int, int] | list[int]],
+    bin_factor: int | None,
+    door_profile_rotate_cw_deg: float = DOOR_PROFILE_ROTATE_CW_DEG,
+) -> dict[str, Any]:
     return {
         "bin_factor": int(bin_factor) if bin_factor is not None else None,
         "rois": normalized_rois_for_cache(rois),
+        "schema_version": FEATURE_CACHE_SCHEMA_VERSION,
+        "door_profile_rotate_cw_deg": float(door_profile_rotate_cw_deg),
     }
 
 
@@ -687,9 +772,10 @@ def load_feature_cache(
     bin_factor: int | None,
     force: bool = False,
     cache_dir_name: str = DEFAULT_CACHE_DIR_NAME,
+    door_profile_rotate_cw_deg: float = DOOR_PROFILE_ROTATE_CW_DEG,
 ) -> tuple[pd.DataFrame, Path, Path, dict[str, Any], str]:
     cache_path, meta_path = feature_cache_paths(data_path, bin_factor, cache_dir_name)
-    expected_meta = feature_cache_metadata(rois, bin_factor)
+    expected_meta = feature_cache_metadata(rois, bin_factor, door_profile_rotate_cw_deg=door_profile_rotate_cw_deg)
 
     if force or not cache_path.exists():
         return pd.DataFrame(), cache_path, meta_path, expected_meta, "none"
@@ -741,6 +827,7 @@ def build_features(
     force_recompute: bool = False,
     max_images: int | None = None,
     cache_dir_name: str = DEFAULT_CACHE_DIR_NAME,
+    door_profile_rotate_cw_deg: float = DOOR_PROFILE_ROTATE_CW_DEG,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     global BIN_CACHE_HITS, BIN_CACHE_MISSES, BIN_CACHE_WARNINGS
 
@@ -749,7 +836,12 @@ def build_features(
 
     work = images if max_images is None else images.iloc[:max_images]
     cached_features, feature_cache_path, feature_meta_path, feature_meta, feature_cache_status = load_feature_cache(
-        data_path, rois, bin_factor, force=force_recompute, cache_dir_name=cache_dir_name
+        data_path,
+        rois,
+        bin_factor,
+        force=force_recompute,
+        cache_dir_name=cache_dir_name,
+        door_profile_rotate_cw_deg=door_profile_rotate_cw_deg,
     )
 
     work = work.copy()
@@ -765,7 +857,13 @@ def build_features(
     feature_failures = []
     for _, row in new_work.iterrows():
         try:
-            stats = roi_stats_for_image(row.path, rois, bin_factor=bin_factor, cache_dir_name=cache_dir_name)
+            stats = roi_stats_for_image(
+                row.path,
+                rois,
+                bin_factor=bin_factor,
+                cache_dir_name=cache_dir_name,
+                door_profile_rotate_cw_deg=door_profile_rotate_cw_deg,
+            )
         except Exception as exc:
             feature_failures.append({"path": row.path, "filename": row.filename, "timestamp": row.timestamp, "reason": str(exc)})
             continue
@@ -861,6 +959,7 @@ def state_from_config(config: Mapping[str, Any]) -> tuple[dict[str, Any], pd.Dat
         force_recompute=bool(feature_config.get("force_recompute_features", False)),
         max_images=feature_config.get("max_images"),
         cache_dir_name=cache_dir_name,
+        door_profile_rotate_cw_deg=float(feature_config.get("door_profile_rotate_cw_deg", DOOR_PROFILE_ROTATE_CW_DEG)),
     )
     row = latest_feature_row(features)
     rules = threshold_rules_from_config(config)

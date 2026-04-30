@@ -8,6 +8,7 @@ image_discovery:
 features:
   force_recompute_features: false
   max_images: null
+  door_profile_rotate_cw_deg: -1.0
 
 rois:
   # first wall position
@@ -17,7 +18,7 @@ rois:
   # car_window: [80, 400, 180, 480]
   # car_door: [120, 520, 220, 620]
   # second wall position by wheel
-  door: [400, 150, 500, 250]
+  door: [502, 100, 552, 375]
   gap_or_outside: [450, 275, 550, 375]
   wall: [960, 460, 1020, 350]
   car_window: [80, 400, 180, 480]
@@ -25,9 +26,9 @@ rois:
 
 conclusions:
   garage_door_open:
-    feature: gap_to_wall_median
-    threshold: 3.5
-    higher_means_true: true
+    feature: door_line_resid_ssq
+    threshold: 8.0
+    higher_means_true: false
   car_present:
     feature: car_window_to_car_door_p90
     threshold: 0.85
