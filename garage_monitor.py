@@ -54,7 +54,9 @@ DOOR_PROFILE_EDGE_DIVISOR = 6
 DOOR_PROFILE_EDGE_MARGIN_DIVISOR = 12
 DOOR_PROFILE_CENTER1 = (21, 30)
 DOOR_PROFILE_CENTER2 = (18, 20)
-FEATURE_CACHE_SCHEMA_VERSION = 2
+CAR_PROFILE_ROTATE_CW_DEG = 40.0
+CAR_PROFILE_MAX_MASKED_FRACTION = 0.25
+FEATURE_CACHE_SCHEMA_VERSION = 3
 
 BIN_CACHE_WARNINGS: list[dict[str, Any]] = []
 BIN_CACHE_HITS = 0
@@ -672,12 +674,82 @@ def door_line_residual_metrics(
     }
 
 
+def car_line_residual_metrics(
+    image: np.ndarray,
+    roi: tuple[int, int, int, int] | list[int],
+    rotate_cw_deg: float = CAR_PROFILE_ROTATE_CW_DEG,
+    max_masked_fraction: float = CAR_PROFILE_MAX_MASKED_FRACTION,
+) -> dict[str, float]:
+    raw_crop = roi_crop(image, roi)
+    raw_valid_fraction = float(np.mean(np.isfinite(raw_crop))) if raw_crop.size else np.nan
+    raw_masked_fraction = 1.0 - raw_valid_fraction if pd.notna(raw_valid_fraction) else np.nan
+
+    empty = {
+        "car_line_resid_sumabs": np.nan,
+        "car_line_resid_ssq": np.nan,
+        "car_line_resid_sumabs_raw": np.nan,
+        "car_line_resid_ssq_raw": np.nan,
+        "car_profile_valid_fraction": raw_valid_fraction,
+        "car_profile_masked_fraction": raw_masked_fraction,
+        "car_profile_valid_fraction_rotated": np.nan,
+        "car_profile_masked_fraction_rotated": np.nan,
+        "car_metric_trusted": False,
+    }
+
+    crop = rotated_roi_crop(image, roi, rotate_cw_deg=rotate_cw_deg)
+    if crop.size == 0 or not np.isfinite(crop).any():
+        return empty
+
+    valid_cols = np.isfinite(crop).any(axis=0)
+    crop = crop[:, valid_cols]
+    rotated_valid_fraction = float(np.mean(np.isfinite(crop))) if crop.size else np.nan
+    rotated_masked_fraction = 1.0 - rotated_valid_fraction if pd.notna(rotated_valid_fraction) else np.nan
+    trusted = bool(raw_masked_fraction <= max_masked_fraction) if pd.notna(raw_masked_fraction) else False
+    if crop.shape[1] < 20:
+        empty["car_profile_valid_fraction_rotated"] = rotated_valid_fraction
+        empty["car_profile_masked_fraction_rotated"] = rotated_masked_fraction
+        empty["car_metric_trusted"] = trusted
+        return empty
+
+    profile = np.nanmedian(crop, axis=0)
+    finite = np.isfinite(profile)
+    if finite.sum() < 20:
+        empty["car_profile_valid_fraction_rotated"] = rotated_valid_fraction
+        empty["car_profile_masked_fraction_rotated"] = rotated_masked_fraction
+        empty["car_metric_trusted"] = trusted
+        return empty
+
+    x = np.arange(profile.size, dtype=float)
+    y = profile - float(np.nanmean(profile))
+    finite_x = x[finite]
+    finite_y = y[finite]
+    slope, intercept = np.polyfit(finite_x, finite_y, deg=1)
+    fit_line = slope * finite_x + intercept
+    residual = finite_y - fit_line
+    sumabs = float(np.nansum(np.abs(residual)))
+    ssq = float(np.nansum(residual ** 2))
+
+    return {
+        "car_line_resid_sumabs": sumabs if trusted else np.nan,
+        "car_line_resid_ssq": ssq if trusted else np.nan,
+        "car_line_resid_sumabs_raw": sumabs,
+        "car_line_resid_ssq_raw": ssq,
+        "car_profile_valid_fraction": raw_valid_fraction,
+        "car_profile_masked_fraction": raw_masked_fraction,
+        "car_profile_valid_fraction_rotated": rotated_valid_fraction,
+        "car_profile_masked_fraction_rotated": rotated_masked_fraction,
+        "car_metric_trusted": trusted,
+    }
+
+
 def roi_stats_for_image(
     path: str | Path,
     rois: Mapping[str, tuple[int, int, int, int] | list[int]],
     bin_factor: int | None = 4,
     cache_dir_name: str = DEFAULT_CACHE_DIR_NAME,
     door_profile_rotate_cw_deg: float = DOOR_PROFILE_ROTATE_CW_DEG,
+    car_profile_rotate_cw_deg: float = CAR_PROFILE_ROTATE_CW_DEG,
+    car_profile_max_masked_fraction: float = CAR_PROFILE_MAX_MASKED_FRACTION,
 ) -> dict[str, float | int]:
     img = load_luma(path, bin_factor=bin_factor, cache_dir_name=cache_dir_name)
     img, band_info = mask_banded_rows(img)
@@ -702,6 +774,15 @@ def roi_stats_for_image(
 
     if "door" in rois:
         out.update(door_line_residual_metrics(img, rois["door"], rotate_cw_deg=door_profile_rotate_cw_deg))
+    if "car_door" in rois:
+        out.update(
+            car_line_residual_metrics(
+                img,
+                rois["car_door"],
+                rotate_cw_deg=car_profile_rotate_cw_deg,
+                max_masked_fraction=car_profile_max_masked_fraction,
+            )
+        )
     return out
 
 
@@ -725,17 +806,6 @@ def add_candidate_features(df: pd.DataFrame) -> pd.DataFrame:
 
     add_ratio_feature(out, "gap_or_outside_median", "wall_median", "gap_to_wall_median")
 
-    add_ratio_feature(out, "car_window_median", "car_door_median", "car_window_to_car_door_median")
-    add_ratio_feature(out, "car_door_median", "car_window_median", "car_door_to_car_window_median")
-    add_ratio_feature(out, "car_window_median", "wall_median", "car_window_to_wall_median")
-    add_ratio_feature(out, "car_door_median", "wall_median", "car_door_to_wall_median")
-    add_difference_feature(out, "car_door_median", "car_window_median", "car_door_minus_car_window_median")
-
-    add_ratio_feature(out, "car_window_p10", "car_door_median", "car_window_p10_to_car_door_median")
-    add_ratio_feature(out, "car_window_median", "car_door_p90", "car_window_to_car_door_p90")
-    add_ratio_feature(out, "car_window_p10", "wall_median", "car_window_p10_to_wall_median")
-    add_ratio_feature(out, "car_door_p90", "wall_median", "car_door_p90_to_wall_median")
-
     return out
 
 
@@ -747,12 +817,16 @@ def feature_cache_metadata(
     rois: Mapping[str, tuple[int, int, int, int] | list[int]],
     bin_factor: int | None,
     door_profile_rotate_cw_deg: float = DOOR_PROFILE_ROTATE_CW_DEG,
+    car_profile_rotate_cw_deg: float = CAR_PROFILE_ROTATE_CW_DEG,
+    car_profile_max_masked_fraction: float = CAR_PROFILE_MAX_MASKED_FRACTION,
 ) -> dict[str, Any]:
     return {
         "bin_factor": int(bin_factor) if bin_factor is not None else None,
         "rois": normalized_rois_for_cache(rois),
         "schema_version": FEATURE_CACHE_SCHEMA_VERSION,
         "door_profile_rotate_cw_deg": float(door_profile_rotate_cw_deg),
+        "car_profile_rotate_cw_deg": float(car_profile_rotate_cw_deg),
+        "car_profile_max_masked_fraction": float(car_profile_max_masked_fraction),
     }
 
 
@@ -773,9 +847,17 @@ def load_feature_cache(
     force: bool = False,
     cache_dir_name: str = DEFAULT_CACHE_DIR_NAME,
     door_profile_rotate_cw_deg: float = DOOR_PROFILE_ROTATE_CW_DEG,
+    car_profile_rotate_cw_deg: float = CAR_PROFILE_ROTATE_CW_DEG,
+    car_profile_max_masked_fraction: float = CAR_PROFILE_MAX_MASKED_FRACTION,
 ) -> tuple[pd.DataFrame, Path, Path, dict[str, Any], str]:
     cache_path, meta_path = feature_cache_paths(data_path, bin_factor, cache_dir_name)
-    expected_meta = feature_cache_metadata(rois, bin_factor, door_profile_rotate_cw_deg=door_profile_rotate_cw_deg)
+    expected_meta = feature_cache_metadata(
+        rois,
+        bin_factor,
+        door_profile_rotate_cw_deg=door_profile_rotate_cw_deg,
+        car_profile_rotate_cw_deg=car_profile_rotate_cw_deg,
+        car_profile_max_masked_fraction=car_profile_max_masked_fraction,
+    )
 
     if force or not cache_path.exists():
         return pd.DataFrame(), cache_path, meta_path, expected_meta, "none"
@@ -828,6 +910,8 @@ def build_features(
     max_images: int | None = None,
     cache_dir_name: str = DEFAULT_CACHE_DIR_NAME,
     door_profile_rotate_cw_deg: float = DOOR_PROFILE_ROTATE_CW_DEG,
+    car_profile_rotate_cw_deg: float = CAR_PROFILE_ROTATE_CW_DEG,
+    car_profile_max_masked_fraction: float = CAR_PROFILE_MAX_MASKED_FRACTION,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     global BIN_CACHE_HITS, BIN_CACHE_MISSES, BIN_CACHE_WARNINGS
 
@@ -842,6 +926,8 @@ def build_features(
         force=force_recompute,
         cache_dir_name=cache_dir_name,
         door_profile_rotate_cw_deg=door_profile_rotate_cw_deg,
+        car_profile_rotate_cw_deg=car_profile_rotate_cw_deg,
+        car_profile_max_masked_fraction=car_profile_max_masked_fraction,
     )
 
     work = work.copy()
@@ -863,6 +949,8 @@ def build_features(
                 bin_factor=bin_factor,
                 cache_dir_name=cache_dir_name,
                 door_profile_rotate_cw_deg=door_profile_rotate_cw_deg,
+                car_profile_rotate_cw_deg=car_profile_rotate_cw_deg,
+                car_profile_max_masked_fraction=car_profile_max_masked_fraction,
             )
         except Exception as exc:
             feature_failures.append({"path": row.path, "filename": row.filename, "timestamp": row.timestamp, "reason": str(exc)})
@@ -960,6 +1048,8 @@ def state_from_config(config: Mapping[str, Any]) -> tuple[dict[str, Any], pd.Dat
         max_images=feature_config.get("max_images"),
         cache_dir_name=cache_dir_name,
         door_profile_rotate_cw_deg=float(feature_config.get("door_profile_rotate_cw_deg", DOOR_PROFILE_ROTATE_CW_DEG)),
+        car_profile_rotate_cw_deg=float(feature_config.get("car_profile_rotate_cw_deg", CAR_PROFILE_ROTATE_CW_DEG)),
+        car_profile_max_masked_fraction=float(feature_config.get("car_profile_max_masked_fraction", CAR_PROFILE_MAX_MASKED_FRACTION)),
     )
     row = latest_feature_row(features)
     rules = threshold_rules_from_config(config)

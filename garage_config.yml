@@ -1,53 +1,62 @@
 data_path: /Volumes/general/garage
 bin_factor: 4
 cache_dir_name: binned
-
 image_discovery:
   force_rescan_images: false
-
 features:
   force_recompute_features: false
   max_images: null
   door_profile_rotate_cw_deg: -1.0
-
+  car_profile_rotate_cw_deg: 40.0
+  car_profile_max_masked_fraction: 0.25
 rois:
-  # first wall position
-  # door: [400, 200, 525, 350]
-  # gap_or_outside: [400, 500, 525, 375]
-  # wall: [1050, 350, 1130, 125]
-  # car_window: [80, 400, 180, 480]
-  # car_door: [120, 520, 220, 620]
-  # second wall position by wheel
-  door: [502, 100, 552, 375]
-  gap_or_outside: [450, 275, 550, 375]
-  wall: [960, 460, 1020, 350]
-  car_window: [80, 400, 180, 480]
-  car_door: [170, 520, 270, 620]
-
+  door:
+  - 502
+  - 100
+  - 552
+  - 375
+  gap_or_outside:
+  - 450
+  - 275
+  - 550
+  - 375
+  wall:
+  - 960
+  - 460
+  - 1020
+  - 350
+  car_window:
+  - 80
+  - 400
+  - 180
+  - 480
+  car_door:
+  - 100
+  - 500
+  - 200
+  - 600
 conclusions:
   garage_door_open:
     feature: door_line_resid_ssq
     threshold: 8.0
     higher_means_true: false
   car_present:
-    feature: car_window_to_car_door_p90
-    threshold: 0.85
-    higher_means_true: false
-
+    feature: car_line_resid_ssq
+    threshold: 600.0
+    higher_means_true: true
 automation:
   state_path: garage_status.json
   event_log_path: garage_events.jsonl
   html_status_path: garage_status.html
   latest_binned_image_path: garage_latest_binned.png
   notification_log_path: garage_notifications.jsonl
-
   notifications:
     enabled: true
     provider: ntfy
     url_env: GARAGE_NTFY_URL
     title: Garage
-    tags: [garage]
-
+    tags:
+    - garage
   transitions:
     garage_door_open:
       false_to_true:
@@ -63,11 +72,10 @@ automation:
       false_to_true:
         enabled: true
         message: Car is back in the garage.
-
   scheduled_checks:
-    - name: garage_open_evening
-      at: "21:00"
-      enabled: true
-      condition:
-        garage_door_open: true
-      message: Garage door is still open.
+  - name: garage_open_evening
+    at: '21:00'
+    enabled: true
+    condition:
+      garage_door_open: true
+    message: Garage door is still open.
