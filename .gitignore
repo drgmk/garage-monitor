@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 
+*ipynb
+
 # Generated runtime state.
 garage_status.json
 garage_status.html
