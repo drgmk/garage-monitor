@@ -22,6 +22,7 @@ DEFAULT_AUTOMATION = {
     "html_status_path": "garage_status.html",
     "latest_binned_image_path": "garage_latest_binned.png",
     "notification_log_path": "garage_notifications.jsonl",
+    "recent_events_limit": 25,
     "notifications": {
         "enabled": False,
         "provider": "ntfy",
@@ -474,7 +475,8 @@ def update_status(config_path: Path, mode: str = "all") -> tuple[dict[str, Any],
         }
 
     previous_events = previous_doc.get("recent_events", [])
-    recent_events = (previous_events + events)[-25:]
+    recent_events_limit = int(auto.get("recent_events_limit", 25))
+    recent_events = (previous_events + events)[-recent_events_limit:]
     status_doc = {
         "updated_at": now.isoformat(timespec="seconds"),
         "state": current_state,

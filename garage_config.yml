@@ -79,3 +79,4 @@ automation:
     condition:
       garage_door_open: true
     message: Garage door is still open.
+  recent_events_limit: 5
