@@ -63,7 +63,7 @@ automation:
         enabled: true
         message: Garage door opened.
       true_to_false:
-        enabled: false
+        enabled: true
         message: Garage door closed.
     car_present:
       true_to_false:
@@ -74,7 +74,7 @@ automation:
         message: Car is back in the garage.
   scheduled_checks:
   - name: garage_open_evening
-    at: '21:00'
+    at: '20:00'
     enabled: true
     condition:
       garage_door_open: true
