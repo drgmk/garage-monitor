@@ -123,6 +123,32 @@ def format_heading_time(value: Any) -> str:
     return observed_at.strftime("%H:%M on %a %-d %B")
 
 
+def resolve_indeterminate_state(
+    previous_state: Mapping[str, Any] | None,
+    current_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not previous_state:
+        return dict(current_state)
+
+    out = dict(current_state)
+    current_conclusions = current_state.get("conclusions", {}) or {}
+    out_conclusions = {
+        key: (dict(value) if isinstance(value, Mapping) else value)
+        for key, value in current_conclusions.items()
+    }
+
+    for key in ("garage_door_open", "car_present"):
+        if out.get(key) is None and previous_state.get(key) is not None:
+            out[key] = previous_state.get(key)
+            conclusion = out_conclusions.get(key)
+            if isinstance(conclusion, dict):
+                conclusion["result"] = previous_state.get(key)
+                conclusion["carried_forward"] = True
+
+    out["conclusions"] = out_conclusions
+    return out
+
+
 def transition_events(
     previous_state: Mapping[str, Any] | None,
     current_state: Mapping[str, Any],
@@ -454,6 +480,7 @@ def update_status(config_path: Path, mode: str = "all") -> tuple[dict[str, Any],
     previous_doc = read_json(paths["state"], default={})
     previous_state = previous_doc.get("state")
     current_state, _, _ = gm.state_from_config(config)
+    current_state = resolve_indeterminate_state(previous_state, current_state)
 
     events = []
     if mode in {"all", "transitions"}:

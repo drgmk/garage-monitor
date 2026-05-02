@@ -60,6 +60,7 @@ def rebuild_timeline(config_path: Path, mode: str = "all") -> tuple[dict[str, An
 
     for _, row in features.iterrows():
         current_state = build_state_from_row(row, rules)
+        current_state = gs.resolve_indeterminate_state(previous_state, current_state)
         now = pd.to_datetime(row["timestamp"]).to_pydatetime()
         latest_state = current_state
 

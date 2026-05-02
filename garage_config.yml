@@ -9,6 +9,7 @@ features:
   door_profile_rotate_cw_deg: -1.0
   car_profile_rotate_cw_deg: 40.0
   car_profile_max_masked_fraction: 0.25
+  door_profile_max_masked_fraction: 0.25
 rois:
   door:
   - 502
