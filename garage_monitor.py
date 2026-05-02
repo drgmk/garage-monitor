@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import pickle
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -57,7 +58,7 @@ DOOR_PROFILE_CENTER2 = (18, 20)
 DOOR_PROFILE_MAX_MASKED_FRACTION = 0.25
 CAR_PROFILE_ROTATE_CW_DEG = 40.0
 CAR_PROFILE_MAX_MASKED_FRACTION = 0.25
-FEATURE_CACHE_SCHEMA_VERSION = 4
+FEATURE_CACHE_SCHEMA_VERSION = 5
 
 BIN_CACHE_WARNINGS: list[dict[str, Any]] = []
 BIN_CACHE_HITS = 0
@@ -77,16 +78,22 @@ class ThresholdRule:
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
-    with Path(path).expanduser().open("r", encoding="utf-8") as handle:
+    config_path = Path(path).expanduser()
+    with config_path.open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}
     if "data_path" not in config:
         raise ValueError("Config must define data_path")
+    base_dir = config_path.resolve().parent
     config["data_path"] = Path(config["data_path"]).expanduser()
     config["bin_factor"] = config.get("bin_factor", 4)
     config["cache_dir_name"] = config.get("cache_dir_name", DEFAULT_CACHE_DIR_NAME)
     config["rois"] = {name: tuple(values) for name, values in config.get("rois", {}).items()}
+    general_change = dict(config.get("general_change", {}) or {})
+    if general_change.get("model_path"):
+        model_path = Path(general_change["model_path"]).expanduser()
+        general_change["model_path"] = model_path if model_path.is_absolute() else base_dir / model_path
+    config["general_change"] = general_change
     return config
-
 
 def cache_dir(data_path: str | Path, cache_dir_name: str = DEFAULT_CACHE_DIR_NAME) -> Path:
     return Path(data_path) / cache_dir_name
@@ -487,6 +494,203 @@ def mask_banded_rows(image: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
     return masked, band_info
 
 
+def gaussian_blur_nan(image: np.ndarray, sigma: float) -> np.ndarray:
+    if sigma is None or sigma <= 0:
+        return np.asarray(image, dtype=np.float32)
+
+    data = np.asarray(image, dtype=np.float32)
+    valid = np.isfinite(data)
+    if not valid.any():
+        return np.full_like(data, np.nan, dtype=np.float32)
+
+    filled = np.where(valid, data, 0.0)
+    weights = valid.astype(np.float32)
+    blurred = ndimage.gaussian_filter(filled, sigma=sigma, mode="nearest")
+    weight_blur = ndimage.gaussian_filter(weights, sigma=sigma, mode="nearest")
+
+    out = np.full_like(data, np.nan, dtype=np.float32)
+    good = weight_blur > 1e-6
+    out[good] = blurred[good] / weight_blur[good]
+    return out
+
+
+def preprocess_structure_image(
+    image: np.ndarray,
+    mode: str = "none",
+    sigma: float = 2.0,
+    amount: float = 1.0,
+    clip: bool = True,
+) -> np.ndarray:
+    arr = np.asarray(image, dtype=np.float32)
+    if mode in (None, "none"):
+        return arr
+
+    smooth = gaussian_blur_nan(arr, sigma=sigma)
+    if mode == "highpass":
+        out = arr - smooth
+    elif mode == "unsharp":
+        out = arr + amount * (arr - smooth)
+    else:
+        raise ValueError(f"Unknown preprocess_mode={mode!r}")
+
+    if clip and np.isfinite(arr).any():
+        out = np.clip(out, np.nanmin(arr), np.nanmax(arr))
+    return out.astype(np.float32)
+
+
+def compact_image_mean(image: np.ndarray, factor: int = 8) -> np.ndarray:
+    arr = np.asarray(image, dtype=np.float32)
+    if factor is None or factor <= 1:
+        return arr
+    h, w = arr.shape
+    h2 = (h // factor) * factor
+    w2 = (w // factor) * factor
+    arr = arr[:h2, :w2]
+    if h2 == 0 or w2 == 0:
+        raise ValueError("Downsample factor too large for image shape")
+    return arr.reshape(h2 // factor, factor, w2 // factor, factor).mean(axis=(1, 3))
+
+
+def vectorize_image_for_general_change(
+    path: str | Path,
+    *,
+    bin_factor: int = 4,
+    cache_dir_name: str = DEFAULT_CACHE_DIR_NAME,
+    spatial_downsample: int = 8,
+    preprocess_mode: str = "none",
+    preprocess_sigma: float = 2.0,
+    preprocess_amount: float = 1.0,
+    clip_preprocessed: bool = True,
+) -> np.ndarray:
+    img = load_luma(path, bin_factor=bin_factor, cache_dir_name=cache_dir_name)
+    img, _ = mask_banded_rows(img)
+    img = preprocess_structure_image(
+        img,
+        mode=preprocess_mode,
+        sigma=preprocess_sigma,
+        amount=preprocess_amount,
+        clip=clip_preprocessed,
+    )
+    compact = compact_image_mean(img, factor=spatial_downsample)
+    if np.isfinite(compact).any():
+        fill_value = np.nanmedian(compact)
+    else:
+        fill_value = 0.0
+    if not np.isfinite(fill_value):
+        fill_value = 0.0
+    compact = np.where(np.isfinite(compact), compact, fill_value)
+    return compact.astype(np.float32)
+
+
+def vectorize_image_for_general_change_job(args: tuple[Any, ...]) -> np.ndarray:
+    (
+        path,
+        bin_factor,
+        cache_dir_name,
+        spatial_downsample,
+        preprocess_mode,
+        preprocess_sigma,
+        preprocess_amount,
+        clip_preprocessed,
+    ) = args
+    return vectorize_image_for_general_change(
+        path,
+        bin_factor=bin_factor,
+        cache_dir_name=cache_dir_name,
+        spatial_downsample=spatial_downsample,
+        preprocess_mode=preprocess_mode,
+        preprocess_sigma=preprocess_sigma,
+        preprocess_amount=preprocess_amount,
+        clip_preprocessed=clip_preprocessed,
+    )
+
+
+def general_change_model_signature(model_path: str | Path | None) -> dict[str, Any] | None:
+    if not model_path:
+        return None
+    path = Path(model_path)
+    if not path.exists():
+        return {"path": str(path), "exists": False}
+    stat = path.stat()
+    return {
+        "path": str(path.resolve()),
+        "exists": True,
+        "mtime_ns": int(stat.st_mtime_ns),
+        "size": int(stat.st_size),
+    }
+
+
+def save_general_change_model(path: str | Path, model: Mapping[str, Any]) -> Path:
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("wb") as handle:
+        pickle.dump(dict(model), handle, protocol=pickle.HIGHEST_PROTOCOL)
+    return out_path
+
+
+def load_general_change_model(model_path: str | Path | None) -> dict[str, Any] | None:
+    if not model_path:
+        return None
+    path = Path(model_path)
+    if not path.exists():
+        return None
+    with path.open("rb") as handle:
+        model = pickle.load(handle)
+    required = {"scaler", "pca", "vector_bin_factor", "spatial_downsample", "preprocess_mode", "preprocess_sigma", "preprocess_amount", "clip_preprocessed"}
+    missing = required.difference(model)
+    if missing:
+        raise ValueError(f"General-change PCA model missing keys: {sorted(missing)}")
+    return dict(model)
+
+
+def project_general_change_rows(
+    rows: pd.DataFrame,
+    model: Mapping[str, Any] | None,
+    cache_dir_name: str = DEFAULT_CACHE_DIR_NAME,
+) -> pd.DataFrame:
+    if model is None or rows.empty:
+        return pd.DataFrame()
+
+    scaler = model["scaler"]
+    pca = model["pca"]
+    expected_size = model.get("vector_size")
+    projection_rows: list[dict[str, Any]] = []
+
+    for row in rows.itertuples():
+        compact = vectorize_image_for_general_change(
+            row.path,
+            bin_factor=int(model.get("vector_bin_factor", 4)),
+            cache_dir_name=cache_dir_name,
+            spatial_downsample=int(model.get("spatial_downsample", 8)),
+            preprocess_mode=str(model.get("preprocess_mode", "none")),
+            preprocess_sigma=float(model.get("preprocess_sigma", 2.0)),
+            preprocess_amount=float(model.get("preprocess_amount", 1.0)),
+            clip_preprocessed=bool(model.get("clip_preprocessed", True)),
+        )
+        x_raw = compact.reshape(1, -1)
+        if expected_size is not None and x_raw.shape[1] != int(expected_size):
+            raise ValueError(
+                f"Vector size mismatch for {row.path}: got {x_raw.shape[1]}, expected {expected_size}"
+            )
+        row_median = np.median(x_raw, axis=1, keepdims=True)
+        x_centered = x_raw - row_median
+        x_scaled = scaler.transform(x_centered)
+        z = pca.transform(x_scaled)[0]
+        recon = pca.inverse_transform(z.reshape(1, -1))[0]
+        residual = float(np.sqrt(np.mean((x_scaled[0] - recon) ** 2)))
+
+        record = {
+            "image_key": str(row.image_key),
+            "general_change_residual_projected": residual,
+            "general_vector_luma_median": float(row_median[0, 0]),
+        }
+        for idx, value in enumerate(z, start=1):
+            record[f"general_pc{idx}"] = float(value)
+        projection_rows.append(record)
+
+    return pd.DataFrame(projection_rows)
+
+
 def show_unavailable_image(path: str | Path, reason: Exception, ax: Any = None, title: str | None = None) -> Any:
     import matplotlib.pyplot as plt
 
@@ -846,6 +1050,23 @@ def add_candidate_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def add_interesting_image_feature(
+    df: pd.DataFrame,
+    interesting_pc4_threshold: float | None,
+    interesting_pc5_threshold: float | None,
+) -> pd.DataFrame:
+    out = df.copy()
+    if interesting_pc4_threshold is None or interesting_pc5_threshold is None:
+        return out
+    if {"general_pc4", "general_pc5"}.issubset(out.columns):
+        uninteresting = (out["general_pc4"] > float(interesting_pc4_threshold)) & (
+            out["general_pc5"] > float(interesting_pc5_threshold)
+        )
+        out["interesting_image_flag"] = (~uninteresting).astype(float)
+    elif "interesting_image_flag" not in out.columns:
+        out["interesting_image_flag"] = np.nan
+    return out
+
 def normalized_rois_for_cache(rois: Mapping[str, tuple[int, int, int, int] | list[int]]) -> dict[str, list[int]]:
     return {name: [int(v) for v in normalize_roi(roi)] for name, roi in rois.items()}
 
@@ -857,6 +1078,9 @@ def feature_cache_metadata(
     door_profile_max_masked_fraction: float = DOOR_PROFILE_MAX_MASKED_FRACTION,
     car_profile_rotate_cw_deg: float = CAR_PROFILE_ROTATE_CW_DEG,
     car_profile_max_masked_fraction: float = CAR_PROFILE_MAX_MASKED_FRACTION,
+    general_change_model_path: str | Path | None = None,
+    interesting_pc4_threshold: float | None = None,
+    interesting_pc5_threshold: float | None = None,
 ) -> dict[str, Any]:
     return {
         "bin_factor": int(bin_factor) if bin_factor is not None else None,
@@ -866,8 +1090,10 @@ def feature_cache_metadata(
         "door_profile_max_masked_fraction": float(door_profile_max_masked_fraction),
         "car_profile_rotate_cw_deg": float(car_profile_rotate_cw_deg),
         "car_profile_max_masked_fraction": float(car_profile_max_masked_fraction),
+        "general_change_model": general_change_model_signature(general_change_model_path),
+        "interesting_pc4_threshold": None if interesting_pc4_threshold is None else float(interesting_pc4_threshold),
+        "interesting_pc5_threshold": None if interesting_pc5_threshold is None else float(interesting_pc5_threshold),
     }
-
 
 def feature_cache_paths(
     data_path: str | Path,
@@ -889,6 +1115,9 @@ def load_feature_cache(
     door_profile_max_masked_fraction: float = DOOR_PROFILE_MAX_MASKED_FRACTION,
     car_profile_rotate_cw_deg: float = CAR_PROFILE_ROTATE_CW_DEG,
     car_profile_max_masked_fraction: float = CAR_PROFILE_MAX_MASKED_FRACTION,
+    general_change_model_path: str | Path | None = None,
+    interesting_pc4_threshold: float | None = None,
+    interesting_pc5_threshold: float | None = None,
 ) -> tuple[pd.DataFrame, Path, Path, dict[str, Any], str]:
     cache_path, meta_path = feature_cache_paths(data_path, bin_factor, cache_dir_name)
     expected_meta = feature_cache_metadata(
@@ -898,6 +1127,9 @@ def load_feature_cache(
         door_profile_max_masked_fraction=door_profile_max_masked_fraction,
         car_profile_rotate_cw_deg=car_profile_rotate_cw_deg,
         car_profile_max_masked_fraction=car_profile_max_masked_fraction,
+        general_change_model_path=general_change_model_path,
+        interesting_pc4_threshold=interesting_pc4_threshold,
+        interesting_pc5_threshold=interesting_pc5_threshold,
     )
 
     if force or not cache_path.exists():
@@ -932,7 +1164,6 @@ def load_feature_cache(
 
     return cached, cache_path, meta_path, expected_meta, "loaded"
 
-
 def save_feature_cache(features: pd.DataFrame, cache_path: Path, meta_path: Path, metadata: Mapping[str, Any]) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     features.to_pickle(cache_path)
@@ -954,6 +1185,9 @@ def build_features(
     door_profile_max_masked_fraction: float = DOOR_PROFILE_MAX_MASKED_FRACTION,
     car_profile_rotate_cw_deg: float = CAR_PROFILE_ROTATE_CW_DEG,
     car_profile_max_masked_fraction: float = CAR_PROFILE_MAX_MASKED_FRACTION,
+    general_change_model_path: str | Path | None = None,
+    interesting_pc4_threshold: float | None = None,
+    interesting_pc5_threshold: float | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     global BIN_CACHE_HITS, BIN_CACHE_MISSES, BIN_CACHE_WARNINGS
 
@@ -971,6 +1205,9 @@ def build_features(
         door_profile_max_masked_fraction=door_profile_max_masked_fraction,
         car_profile_rotate_cw_deg=car_profile_rotate_cw_deg,
         car_profile_max_masked_fraction=car_profile_max_masked_fraction,
+        general_change_model_path=general_change_model_path,
+        interesting_pc4_threshold=interesting_pc4_threshold,
+        interesting_pc5_threshold=interesting_pc5_threshold,
     )
 
     work = work.copy()
@@ -1011,14 +1248,34 @@ def build_features(
         feature_rows.append(stats)
 
     new_features = pd.DataFrame(feature_rows)
+    general_change_model = load_general_change_model(general_change_model_path)
+    if general_change_model is not None and not new_features.empty:
+        projected = project_general_change_rows(
+            new_features[["image_key", "path"]],
+            general_change_model,
+            cache_dir_name=cache_dir_name,
+        )
+        if not projected.empty:
+            new_features = new_features.merge(projected, on="image_key", how="left")
+
     if not new_features.empty:
         new_features = add_candidate_features(new_features)
+        new_features = add_interesting_image_feature(
+            new_features,
+            interesting_pc4_threshold=interesting_pc4_threshold,
+            interesting_pc5_threshold=interesting_pc5_threshold,
+        )
 
     features = concat_if_needed([cached_features, new_features])
     if not features.empty:
         features["image_key"] = features["image_key"].astype(str)
         features = features.sort_values("timestamp").drop_duplicates("image_key", keep="last").reset_index(drop=True)
         features = add_candidate_features(features)
+        features = add_interesting_image_feature(
+            features,
+            interesting_pc4_threshold=interesting_pc4_threshold,
+            interesting_pc5_threshold=interesting_pc5_threshold,
+        )
 
     if features.empty:
         raise ValueError("No features were available. Check image readability, feature cache, and ROI definitions.")
@@ -1035,9 +1292,10 @@ def build_features(
         "binned_cache_misses": BIN_CACHE_MISSES,
         "binned_cache_warnings": BIN_CACHE_WARNINGS,
         "feature_failures": feature_failures,
+        "general_change_model_path": None if general_change_model_path is None else str(general_change_model_path),
+        "general_change_model_loaded": bool(general_change_model is not None),
     }
     return features, info
-
 
 def threshold_rules_from_config(config: Mapping[str, Any]) -> dict[str, ThresholdRule]:
     rules = {}
@@ -1076,6 +1334,7 @@ def state_from_config(config: Mapping[str, Any]) -> tuple[dict[str, Any], pd.Dat
     cache_dir_name = config.get("cache_dir_name", DEFAULT_CACHE_DIR_NAME)
     discovery_config = config.get("image_discovery", {})
     feature_config = config.get("features", {})
+    general_change_config = config.get("general_change", {}) or {}
 
     images, discovery_info = discover_images(
         data_path,
@@ -1095,6 +1354,9 @@ def state_from_config(config: Mapping[str, Any]) -> tuple[dict[str, Any], pd.Dat
         door_profile_max_masked_fraction=float(feature_config.get("door_profile_max_masked_fraction", DOOR_PROFILE_MAX_MASKED_FRACTION)),
         car_profile_rotate_cw_deg=float(feature_config.get("car_profile_rotate_cw_deg", CAR_PROFILE_ROTATE_CW_DEG)),
         car_profile_max_masked_fraction=float(feature_config.get("car_profile_max_masked_fraction", CAR_PROFILE_MAX_MASKED_FRACTION)),
+        general_change_model_path=general_change_config.get("model_path"),
+        interesting_pc4_threshold=general_change_config.get("interesting_pc4_threshold"),
+        interesting_pc5_threshold=general_change_config.get("interesting_pc5_threshold"),
     )
     row = latest_feature_row(features)
     rules = threshold_rules_from_config(config)
@@ -1107,11 +1369,11 @@ def state_from_config(config: Mapping[str, Any]) -> tuple[dict[str, Any], pd.Dat
         "image_key": str(row["image_key"]),
         "garage_door_open": conclusions.get("garage_door_open", {}).get("result"),
         "car_present": conclusions.get("car_present", {}).get("result"),
+        "interesting_image": conclusions.get("interesting_image", {}).get("result"),
         "conclusions": conclusions,
     }
     info = {"discovery": discovery_info, "features": feature_info}
     return state, features, info
-
 
 def json_ready(value: Any) -> Any:
     if isinstance(value, Path):
@@ -1133,6 +1395,7 @@ def format_env(state: Mapping[str, Any]) -> str:
         "GARAGE_IMAGE_FILENAME": state["filename"],
         "GARAGE_DOOR_OPEN": state["garage_door_open"],
         "GARAGE_CAR_PRESENT": state["car_present"],
+        "GARAGE_INTERESTING_IMAGE": state.get("interesting_image"),
     }
     return "\n".join(f"{key}={json.dumps(value)}" for key, value in values.items())
 

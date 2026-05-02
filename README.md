@@ -1,6 +1,7 @@
 # Garage Monitor
 
-Threshold-based garage status monitor for Raspberry Pi camera images.
+Garage status monitor for Raspberry Pi camera images, a.k.a. OpenAI Codex aided 
+messing around that went well beyond what was necessary.
 
 The detector reads the latest camera image, extracts brightness features from
 configured regions of interest, and reports:

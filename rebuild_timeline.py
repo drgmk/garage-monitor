@@ -20,6 +20,7 @@ def build_state_from_row(row: pd.Series, rules: Mapping[str, gm.ThresholdRule]) 
         "image_key": str(row.get("image_key", row["filename"])),
         "garage_door_open": conclusions.get("garage_door_open", {}).get("result"),
         "car_present": conclusions.get("car_present", {}).get("result"),
+        "interesting_image": conclusions.get("interesting_image", {}).get("result"),
         "conclusions": conclusions,
     }
 
@@ -29,6 +30,7 @@ def rebuild_timeline(config_path: Path, mode: str = "all") -> tuple[dict[str, An
     auto = gs.automation_config(config)
     discovery_config = config.get("image_discovery", {})
     feature_config = config.get("features", {})
+    general_change_config = config.get("general_change", {}) or {}
 
     images, discovery_info = gm.discover_images(
         config["data_path"],
@@ -45,8 +47,12 @@ def rebuild_timeline(config_path: Path, mode: str = "all") -> tuple[dict[str, An
         max_images=feature_config.get("max_images"),
         cache_dir_name=config.get("cache_dir_name", gm.DEFAULT_CACHE_DIR_NAME),
         door_profile_rotate_cw_deg=float(feature_config.get("door_profile_rotate_cw_deg", gm.DOOR_PROFILE_ROTATE_CW_DEG)),
+        door_profile_max_masked_fraction=float(feature_config.get("door_profile_max_masked_fraction", gm.DOOR_PROFILE_MAX_MASKED_FRACTION)),
         car_profile_rotate_cw_deg=float(feature_config.get("car_profile_rotate_cw_deg", gm.CAR_PROFILE_ROTATE_CW_DEG)),
         car_profile_max_masked_fraction=float(feature_config.get("car_profile_max_masked_fraction", gm.CAR_PROFILE_MAX_MASKED_FRACTION)),
+        general_change_model_path=general_change_config.get("model_path"),
+        interesting_pc4_threshold=general_change_config.get("interesting_pc4_threshold"),
+        interesting_pc5_threshold=general_change_config.get("interesting_pc5_threshold"),
     )
     features = features.sort_values("timestamp").reset_index(drop=True)
     rules = gm.threshold_rules_from_config(config)
@@ -64,9 +70,11 @@ def rebuild_timeline(config_path: Path, mode: str = "all") -> tuple[dict[str, An
         now = pd.to_datetime(row["timestamp"]).to_pydatetime()
         latest_state = current_state
 
-        emitted: list[dict[str, Any]] = []
+        raw_events: list[dict[str, Any]] = []
         if mode in {"all", "transitions"}:
-            emitted.extend(gs.transition_events(previous_state, current_state, auto.get("transitions", {}), now))
+            raw_events.extend(gs.transition_events(previous_state, current_state, auto.get("transitions", {}), now))
+        if mode == "all":
+            raw_events.extend(gs.interesting_image_events(previous_state, current_state, auto.get("interesting_image_event", {}), now))
 
         if mode in {"all", "scheduled"}:
             scheduled, sent_checks = gs.scheduled_events(
@@ -75,8 +83,9 @@ def rebuild_timeline(config_path: Path, mode: str = "all") -> tuple[dict[str, An
                 auto.get("scheduled_checks", []),
                 now,
             )
-            emitted.extend(scheduled)
+            raw_events.extend(scheduled)
 
+        emitted = gs.aggregate_events_for_image(raw_events, current_state)
         all_events.extend(emitted)
         recent_events = (recent_events + emitted)[-recent_events_limit:]
         previous_state = current_state
@@ -149,6 +158,13 @@ def main(argv: list[str] | None = None) -> int:
     latest_image = status_doc.get("latest_binned_image")
     if latest_image is not None:
         latest_image["url"] = gs.relative_url(Path(latest_image["path"]), html_out)
+    recent_events_limit = int(gs.automation_config(gm.load_config(config_path)).get("recent_events_limit", 25))
+    status_doc["recent_events"] = gs.enrich_recent_events_with_images(
+        gm.load_config(config_path),
+        [dict(event) for event in status_doc.get("recent_events", [])],
+        html_out,
+        recent_events_limit,
+    )
     write_jsonl(events_out, events)
     gs.write_json_atomic(status_out, status_doc)
     html_out.parent.mkdir(parents=True, exist_ok=True)

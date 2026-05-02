@@ -1,4 +1,4 @@
-data_path: /Volumes/general/garage
+data_path: /Users/grant/tmp/garage-images
 bin_factor: 4
 cache_dir_name: binned
 image_discovery:
@@ -10,6 +10,10 @@ features:
   car_profile_rotate_cw_deg: 40.0
   car_profile_max_masked_fraction: 0.25
   door_profile_max_masked_fraction: 0.25
+general_change:
+  model_path: garage_general_pca.pkl
+  interesting_pc4_threshold: -26.0
+  interesting_pc5_threshold: -50.0
 rois:
   door:
   - 502
@@ -39,11 +43,15 @@ rois:
 conclusions:
   garage_door_open:
     feature: door_line_resid_ssq
-    threshold: 8.0
+    threshold: 110.0
     higher_means_true: false
   car_present:
     feature: car_line_resid_ssq
     threshold: 600.0
+    higher_means_true: true
+  interesting_image:
+    feature: interesting_image_flag
+    threshold: 0.5
     higher_means_true: true
 automation:
   state_path: garage_status.json
@@ -73,6 +81,9 @@ automation:
       false_to_true:
         enabled: true
         message: Car is back in the garage.
+  interesting_image_event:
+    enabled: true
+    message: Interesting garage image detected.
   scheduled_checks:
   - name: garage_open_evening
     at: '20:00'

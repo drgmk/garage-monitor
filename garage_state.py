@@ -95,6 +95,56 @@ def latest_binned_image_path(config: Mapping[str, Any], state: Mapping[str, Any]
     return binned_path if binned_path.exists() else None
 
 
+
+def event_binned_image_path(config: Mapping[str, Any], event: Mapping[str, Any]) -> Path | None:
+    filename = event.get("filename")
+    if not filename:
+        return None
+    source_path = Path(config["data_path"]) / str(filename)
+    binned_path = gm.binned_image_path(
+        source_path,
+        bin_factor=config.get("bin_factor", 4),
+        cache_dir_name=config.get("cache_dir_name", gm.DEFAULT_CACHE_DIR_NAME),
+    )
+    return binned_path if binned_path.exists() else None
+
+
+def remove_path_if_present(path: Path) -> None:
+    try:
+        if path.exists() or path.is_symlink():
+            path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def enrich_recent_events_with_images(
+    config: Mapping[str, Any],
+    events: list[Mapping[str, Any]],
+    html_status_path: Path,
+    recent_events_limit: int,
+) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for idx, event in enumerate(events, start=1):
+        out = dict(event)
+        binned_path = event_binned_image_path(config, event)
+        if binned_path is not None:
+            link_path = html_status_path.parent / f"garage_recent_{idx}.png"
+            update_symlink(link_path, binned_path)
+            out["image"] = {
+                "path": link_path,
+                "target": binned_path,
+                "url": relative_url(link_path, html_status_path),
+            }
+        else:
+            out.pop("image", None)
+        enriched.append(out)
+
+    for idx in range(len(events) + 1, int(recent_events_limit) + 1):
+        remove_path_if_present(html_status_path.parent / f"garage_recent_{idx}.png")
+
+    return enriched
+
+
 def relative_url(path: Path, base_path: Path) -> str:
     return Path(os.path.relpath(path, start=base_path.parent)).as_posix()
 
@@ -112,6 +162,8 @@ def state_label(key: str, value: Any) -> str:
         return "open" if value is True else "closed" if value is False else "unknown"
     if key == "car_present":
         return "present" if value is True else "absent" if value is False else "unknown"
+    if key == "interesting_image":
+        return "interesting" if value is True else "ordinary" if value is False else "unknown"
     return bool_key(value)
 
 
@@ -121,6 +173,14 @@ def format_heading_time(value: Any) -> str:
     except ValueError:
         return "unknown time"
     return observed_at.strftime("%H:%M on %a %-d %B")
+
+
+def format_event_time(value: Any) -> str:
+    try:
+        observed_at = datetime.fromisoformat(str(value))
+    except ValueError:
+        return html.escape(str(value)) if value else "unknown time"
+    return observed_at.strftime("%H:%M, %A, %-d %B")
 
 
 def resolve_indeterminate_state(
@@ -186,6 +246,81 @@ def transition_events(
     return events
 
 
+def interesting_image_events(
+    previous_state: Mapping[str, Any] | None,
+    current_state: Mapping[str, Any],
+    rule: Mapping[str, Any] | None,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    rule = rule or {}
+    if not bool(rule.get("enabled", False)):
+        return []
+    if current_state.get("interesting_image") is not True:
+        return []
+    if previous_state and previous_state.get("image_key") == current_state.get("image_key"):
+        return []
+
+    return [
+        {
+            "created_at": now.isoformat(timespec="seconds"),
+            "kind": "interesting_image",
+            "name": "interesting_image.detected",
+            "entity": "interesting_image",
+            "message": rule.get("message", "Interesting garage image detected."),
+            "image_timestamp": current_state.get("timestamp"),
+            "filename": current_state.get("filename"),
+        }
+    ]
+
+
+
+def event_badges(raw_events: list[Mapping[str, Any]]) -> list[dict[str, str]]:
+    badges: list[dict[str, str]] = []
+    entities = {str(event.get("entity", "")) for event in raw_events}
+    kinds = {str(event.get("kind", "")) for event in raw_events}
+
+    if "garage_door_open" in entities:
+        badges.append({"key": "door", "label": "Door"})
+    if "car_present" in entities:
+        badges.append({"key": "car", "label": "Car"})
+    if "interesting_image" in entities:
+        badges.append({"key": "image", "label": "Image"})
+    if "scheduled_check" in kinds:
+        badges.append({"key": "check", "label": "Check"})
+    return badges
+
+
+def aggregate_events_for_image(
+    raw_events: list[Mapping[str, Any]],
+    current_state: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if not raw_events:
+        return []
+
+    messages: list[str] = []
+    seen_messages: set[str] = set()
+    for event in raw_events:
+        message = str(event.get("message", "")).strip()
+        if message and message not in seen_messages:
+            seen_messages.add(message)
+            messages.append(message)
+
+    combined = {
+        "created_at": raw_events[0].get("created_at"),
+        "kind": "image_event",
+        "name": "image_event",
+        "entity": "image",
+        "message": " ".join(messages) if messages else "Garage image event.",
+        "messages": messages,
+        "badges": event_badges(raw_events),
+        "image_timestamp": current_state.get("timestamp"),
+        "filename": current_state.get("filename"),
+        "image_key": current_state.get("image_key"),
+        "source_events": [dict(event) for event in raw_events],
+    }
+    return [combined]
+
+
 def condition_matches(state: Mapping[str, Any], condition: Mapping[str, Any]) -> bool:
     return all(state.get(key) == expected for key, expected in condition.items())
 
@@ -245,6 +380,7 @@ def ntfy_message(event: Mapping[str, Any], state: Mapping[str, Any]) -> str:
         str(event.get("message", "Garage status changed.")),
         f"Door: {state_label('garage_door_open', state.get('garage_door_open'))}",
         f"Car: {state_label('car_present', state.get('car_present'))}",
+        f"Interesting: {state_label('interesting_image', state.get('interesting_image'))}",
     ]
     image_timestamp = event.get("image_timestamp")
     if image_timestamp:
@@ -317,22 +453,46 @@ def render_status_html(status_doc: Mapping[str, Any]) -> str:
 
     door = state_label("garage_door_open", state.get("garage_door_open"))
     car = state_label("car_present", state.get("car_present"))
+    interesting = state_label("interesting_image", state.get("interesting_image"))
     filename = html.escape(str(state.get("filename", "unknown")))
     heading_time = html.escape(format_heading_time(state.get("timestamp")))
     door_class = "is-bad" if state.get("garage_door_open") is True else "is-good" if state.get("garage_door_open") is False else ""
     car_class = "is-good" if state.get("car_present") is True else "is-bad" if state.get("car_present") is False else ""
+    interesting_class = "is-bad" if state.get("interesting_image") is True else "is-good" if state.get("interesting_image") is False else ""
 
-    rows = []
-    for event in events[-10:][::-1]:
-        rows.append(
-            "<tr>"
-            f"<td>{html.escape(str(event.get('created_at', '')))}</td>"
-            f"<td>{html.escape(str(event.get('kind', '')))}</td>"
-            f"<td>{html.escape(str(event.get('message', '')))}</td>"
-            "</tr>"
+    cards = []
+    for event in events[::-1]:
+        created_at = html.escape(format_event_time(event.get("created_at", "")))
+        message = html.escape(str(event.get("message", "")))
+        image_timestamp = html.escape(str(event.get("image_timestamp", "")))
+        event_filename = html.escape(str(event.get("filename", "")))
+        badges_html = "".join(
+            f'<span class="badge badge-{html.escape(str(badge.get("key", "other")))}">{html.escape(str(badge.get("label", "")))}</span>'
+            for badge in (event.get("badges") or [])
         )
+        image_block = ""
+        image_info = event.get("image") or {}
+        image_url = image_info.get("url")
+        if image_url:
+            image_block = (
+                '<div class="event-image-wrap">'
+                f'<img class="event-image" src="{html.escape(str(image_url))}" alt="Recent event image">'
+                '</div>'
+            )
 
-    event_rows = "\n".join(rows) or '<tr><td colspan="3">No events recorded yet.</td></tr>'
+        cards.append(
+            '<details class="event-card">'
+            '<summary>'
+            f'<div class="event-top"><span class="event-time">{created_at}</span><span class="event-badges">{badges_html}</span></div>'
+            f'<div class="event-message">{message}</div>'
+            '</summary>'
+            '<div class="event-body">'
+            f'<div class="event-meta"><div><strong>Image time:</strong> {image_timestamp or "unknown"}</div><div><strong>File:</strong> {event_filename or "unknown"}</div></div>'
+            f'{image_block}'
+            '</div>'
+            '</details>'
+        )
+    event_cards = "\n".join(cards) or '<div class="tile">No events recorded yet.</div>'
     image_section = ""
     if latest_image:
         image_src = html.escape(str(latest_image["url"]))
@@ -378,91 +538,46 @@ def render_status_html(status_doc: Mapping[str, Any]) -> str:
       border-radius: 8px;
       padding: 16px;
     }}
-    .tile.is-good {{
-      background: #dff3e6;
-      border-color: #a8d8b9;
-    }}
-    .tile.is-bad {{
-      background: #f8dddd;
-      border-color: #e4a6a6;
-    }}
-    .label {{
-      color: #52606d;
-      font-size: 14px;
-      margin-bottom: 6px;
-    }}
-    .value {{
-      font-size: 30px;
-      font-weight: 700;
-      text-transform: capitalize;
-    }}
-    table {{
-      background: #ffffff;
-      border: 1px solid #d9e2ec;
-      border-radius: 8px;
-      padding: 16px;
-    }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      padding: 0;
-      overflow: hidden;
-    }}
-    th, td {{
-      border-bottom: 1px solid #d9e2ec;
-      padding: 10px;
-      text-align: left;
-      vertical-align: top;
-      font-size: 14px;
-    }}
-    th {{
-      color: #52606d;
-      font-weight: 600;
-    }}
-    tr:last-child td {{
-      border-bottom: 0;
-    }}
-    .latest-image {{
-      margin: 20px 0;
-    }}
-    .latest-image img {{
-      display: block;
-      width: 100%;
-      height: auto;
-      border: 1px solid #d9e2ec;
-      border-radius: 8px;
-      background: #ffffff;
-    }}
+    .tile.is-good {{ background: #dff3e6; border-color: #a8d8b9; }}
+    .tile.is-bad {{ background: #f8dddd; border-color: #e4a6a6; }}
+    .label {{ color: #52606d; font-size: 14px; margin-bottom: 6px; }}
+    .value {{ font-size: 30px; font-weight: 700; text-transform: capitalize; }}
+    .latest-image {{ margin: 20px 0; }}
+    .latest-image img, .event-image {{ display: block; width: 100%; height: auto; border: 1px solid #d9e2ec; border-radius: 8px; background: #ffffff; }}
+    .events {{ display: grid; gap: 10px; }}
+    .event-card {{ background: #ffffff; border: 1px solid #d9e2ec; border-radius: 8px; overflow: hidden; }}
+    .event-card summary {{ list-style: none; cursor: pointer; padding: 12px 14px; display: grid; gap: 8px; }}
+    .event-card summary::-webkit-details-marker {{ display: none; }}
+    .event-card[open] summary {{ border-bottom: 1px solid #d9e2ec; }}
+    .event-top {{ display: flex; flex-wrap: wrap; gap: 8px 12px; justify-content: space-between; align-items: center; }}
+    .event-time {{ color: #52606d; font-size: 13px; }}
+    .event-message {{ font-size: 14px; font-weight: 600; }}
+    .event-badges {{ display: flex; flex-wrap: wrap; gap: 6px; }}
+    .badge {{ display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; border: 1px solid transparent; }}
+    .badge-door {{ background: #e3f2fd; border-color: #90caf9; color: #0d47a1; }}
+    .badge-car {{ background: #e8f5e9; border-color: #a5d6a7; color: #1b5e20; }}
+    .badge-image {{ background: #fff3e0; border-color: #ffcc80; color: #e65100; }}
+    .badge-check {{ background: #ede7f6; border-color: #b39ddb; color: #4527a0; }}
+    .event-body {{ padding: 14px; display: grid; gap: 12px; }}
+    .event-meta {{ display: grid; gap: 4px; font-size: 14px; }}
+    @media (max-width: 700px) {{ main {{ padding: 16px; }} }}
   </style>
 </head>
 <body>
   <main>
     <h1>Status at {heading_time}</h1>
     <section class="status">
-      <div class="tile {door_class}">
-        <div class="label">Garage door</div>
-        <div class="value">{html.escape(door)}</div>
-      </div>
-      <div class="tile {car_class}">
-        <div class="label">Car</div>
-        <div class="value">{html.escape(car)}</div>
-      </div>
+      <div class="tile {door_class}"><div class="label">Garage door</div><div class="value">{html.escape(door)}</div></div>
+      <div class="tile {car_class}"><div class="label">Car</div><div class="value">{html.escape(car)}</div></div>
+      <div class="tile {interesting_class}"><div class="label">Image</div><div class="value">{html.escape(interesting)}</div></div>
     </section>
     {image_section}
     <h2>Recent Events</h2>
-    <table>
-      <thead>
-        <tr><th>Time</th><th>Type</th><th>Message</th></tr>
-      </thead>
-      <tbody>
-        {event_rows}
-      </tbody>
-    </table>
+    <section class="events">{event_cards}</section>
   </main>
 </body>
 </html>
 """
-
 
 def update_status(config_path: Path, mode: str = "all") -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Path]]:
     config = gm.load_config(config_path)
@@ -482,14 +597,18 @@ def update_status(config_path: Path, mode: str = "all") -> tuple[dict[str, Any],
     current_state, _, _ = gm.state_from_config(config)
     current_state = resolve_indeterminate_state(previous_state, current_state)
 
-    events = []
+    raw_events = []
     if mode in {"all", "transitions"}:
-        events.extend(transition_events(previous_state, current_state, auto.get("transitions", {}), now))
+        raw_events.extend(transition_events(previous_state, current_state, auto.get("transitions", {}), now))
+    if mode == "all":
+        raw_events.extend(interesting_image_events(previous_state, current_state, auto.get("interesting_image_event", {}), now))
 
     sent_checks = dict(previous_doc.get("scheduled_checks", {}).get("sent", {}))
     if mode in {"all", "scheduled"}:
         scheduled, sent_checks = scheduled_events(previous_doc, current_state, auto.get("scheduled_checks", []), now)
-        events.extend(scheduled)
+        raw_events.extend(scheduled)
+
+    events = aggregate_events_for_image(raw_events, current_state)
 
     latest_binned = latest_binned_image_path(config, current_state)
     latest_image = None
@@ -503,7 +622,8 @@ def update_status(config_path: Path, mode: str = "all") -> tuple[dict[str, Any],
 
     previous_events = previous_doc.get("recent_events", [])
     recent_events_limit = int(auto.get("recent_events_limit", 25))
-    recent_events = (previous_events + events)[-recent_events_limit:]
+    raw_recent_events = [dict(event) for event in (previous_events + events)[-recent_events_limit:]]
+    recent_events = enrich_recent_events_with_images(config, raw_recent_events, paths["html_status"], recent_events_limit)
     status_doc = {
         "updated_at": now.isoformat(timespec="seconds"),
         "state": current_state,
@@ -539,7 +659,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     state = status_doc["state"]
-    print(f"status: garage_door={state_label('garage_door_open', state.get('garage_door_open'))}, car={state_label('car_present', state.get('car_present'))}")
+    print(
+        f"status: garage_door={state_label('garage_door_open', state.get('garage_door_open'))}, "
+        f"car={state_label('car_present', state.get('car_present'))}, "
+        f"image={state_label('interesting_image', state.get('interesting_image'))}"
+    )
     print(f"status_json: {paths['state']}")
     print(f"status_html: {paths['html_status']}")
     if events:
