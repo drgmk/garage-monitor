@@ -66,6 +66,11 @@ automation:
     title: Garage
     tags:
     - garage
+    types:
+      door: true
+      car: true
+      image: false
+      check: true
   transitions:
     garage_door_open:
       false_to_true:

@@ -439,6 +439,10 @@ def send_notification(
     if not bool(notification_config.get("enabled", False)):
         return {"notification_status": "skipped", "reason": "notifications disabled"}
 
+    enabled_for_event, skip_reason = notification_enabled_for_event(event, notification_config)
+    if not enabled_for_event:
+        return {"notification_status": "skipped", "reason": skip_reason}
+
     provider = str(notification_config.get("provider", "ntfy")).lower()
     if provider != "ntfy":
         return {"notification_status": "skipped", "reason": f"unsupported provider: {provider}"}
