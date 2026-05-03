@@ -58,7 +58,8 @@ DOOR_PROFILE_CENTER2 = (18, 20)
 DOOR_PROFILE_MAX_MASKED_FRACTION = 0.25
 CAR_PROFILE_ROTATE_CW_DEG = 40.0
 CAR_PROFILE_MAX_MASKED_FRACTION = 0.25
-FEATURE_CACHE_SCHEMA_VERSION = 5
+CAR_PROFILE_FIT_DEGREE = 2
+FEATURE_CACHE_SCHEMA_VERSION = 6
 
 BIN_CACHE_WARNINGS: list[dict[str, Any]] = []
 BIN_CACHE_HITS = 0
@@ -907,26 +908,28 @@ def door_line_residual_metrics(
     }
 
 
-def car_line_residual_metrics(
+def car_profile_residual_metrics(
     image: np.ndarray,
     roi: tuple[int, int, int, int] | list[int],
     rotate_cw_deg: float = CAR_PROFILE_ROTATE_CW_DEG,
     max_masked_fraction: float = CAR_PROFILE_MAX_MASKED_FRACTION,
+    fit_degree: int = CAR_PROFILE_FIT_DEGREE,
 ) -> dict[str, float]:
     raw_crop = roi_crop(image, roi)
     raw_valid_fraction = float(np.mean(np.isfinite(raw_crop))) if raw_crop.size else np.nan
     raw_masked_fraction = 1.0 - raw_valid_fraction if pd.notna(raw_valid_fraction) else np.nan
 
     empty = {
-        "car_line_resid_sumabs": np.nan,
-        "car_line_resid_ssq": np.nan,
-        "car_line_resid_sumabs_raw": np.nan,
-        "car_line_resid_ssq_raw": np.nan,
+        "car_poly_resid_sumabs": np.nan,
+        "car_poly_resid_ssq": np.nan,
+        "car_poly_resid_sumabs_raw": np.nan,
+        "car_poly_resid_ssq_raw": np.nan,
         "car_profile_valid_fraction": raw_valid_fraction,
         "car_profile_masked_fraction": raw_masked_fraction,
         "car_profile_valid_fraction_rotated": np.nan,
         "car_profile_masked_fraction_rotated": np.nan,
         "car_metric_trusted": False,
+        "car_profile_fit_degree": int(fit_degree),
     }
 
     crop = rotated_roi_crop(image, roi, rotate_cw_deg=rotate_cw_deg)
@@ -938,7 +941,8 @@ def car_line_residual_metrics(
     rotated_valid_fraction = float(np.mean(np.isfinite(crop))) if crop.size else np.nan
     rotated_masked_fraction = 1.0 - rotated_valid_fraction if pd.notna(rotated_valid_fraction) else np.nan
     trusted = bool(raw_masked_fraction <= max_masked_fraction) if pd.notna(raw_masked_fraction) else False
-    if crop.shape[1] < 20:
+    min_points = max(20, int(fit_degree) + 2)
+    if crop.shape[1] < min_points:
         empty["car_profile_valid_fraction_rotated"] = rotated_valid_fraction
         empty["car_profile_masked_fraction_rotated"] = rotated_masked_fraction
         empty["car_metric_trusted"] = trusted
@@ -946,7 +950,7 @@ def car_line_residual_metrics(
 
     profile = np.nanmedian(crop, axis=0)
     finite = np.isfinite(profile)
-    if finite.sum() < 20:
+    if finite.sum() < min_points:
         empty["car_profile_valid_fraction_rotated"] = rotated_valid_fraction
         empty["car_profile_masked_fraction_rotated"] = rotated_masked_fraction
         empty["car_metric_trusted"] = trusted
@@ -956,24 +960,24 @@ def car_line_residual_metrics(
     y = profile - float(np.nanmean(profile))
     finite_x = x[finite]
     finite_y = y[finite]
-    slope, intercept = np.polyfit(finite_x, finite_y, deg=1)
-    fit_line = slope * finite_x + intercept
-    residual = finite_y - fit_line
+    coeffs = np.polyfit(finite_x, finite_y, deg=int(fit_degree))
+    fit_curve = np.polyval(coeffs, finite_x)
+    residual = finite_y - fit_curve
     sumabs = float(np.nansum(np.abs(residual)))
     ssq = float(np.nansum(residual ** 2))
 
     return {
-        "car_line_resid_sumabs": sumabs if trusted else np.nan,
-        "car_line_resid_ssq": ssq if trusted else np.nan,
-        "car_line_resid_sumabs_raw": sumabs,
-        "car_line_resid_ssq_raw": ssq,
+        "car_poly_resid_sumabs": sumabs if trusted else np.nan,
+        "car_poly_resid_ssq": ssq if trusted else np.nan,
+        "car_poly_resid_sumabs_raw": sumabs,
+        "car_poly_resid_ssq_raw": ssq,
         "car_profile_valid_fraction": raw_valid_fraction,
         "car_profile_masked_fraction": raw_masked_fraction,
         "car_profile_valid_fraction_rotated": rotated_valid_fraction,
         "car_profile_masked_fraction_rotated": rotated_masked_fraction,
         "car_metric_trusted": trusted,
+        "car_profile_fit_degree": int(fit_degree),
     }
-
 
 def roi_stats_for_image(
     path: str | Path,
@@ -984,6 +988,7 @@ def roi_stats_for_image(
     door_profile_max_masked_fraction: float = DOOR_PROFILE_MAX_MASKED_FRACTION,
     car_profile_rotate_cw_deg: float = CAR_PROFILE_ROTATE_CW_DEG,
     car_profile_max_masked_fraction: float = CAR_PROFILE_MAX_MASKED_FRACTION,
+    car_profile_fit_degree: int = CAR_PROFILE_FIT_DEGREE,
 ) -> dict[str, float | int]:
     img = load_luma(path, bin_factor=bin_factor, cache_dir_name=cache_dir_name)
     img, band_info = mask_banded_rows(img)
@@ -1017,11 +1022,12 @@ def roi_stats_for_image(
         )
     if "car_door" in rois:
         out.update(
-            car_line_residual_metrics(
+            car_profile_residual_metrics(
                 img,
                 rois["car_door"],
                 rotate_cw_deg=car_profile_rotate_cw_deg,
                 max_masked_fraction=car_profile_max_masked_fraction,
+                fit_degree=car_profile_fit_degree,
             )
         )
     return out
@@ -1078,6 +1084,7 @@ def feature_cache_metadata(
     door_profile_max_masked_fraction: float = DOOR_PROFILE_MAX_MASKED_FRACTION,
     car_profile_rotate_cw_deg: float = CAR_PROFILE_ROTATE_CW_DEG,
     car_profile_max_masked_fraction: float = CAR_PROFILE_MAX_MASKED_FRACTION,
+    car_profile_fit_degree: int = CAR_PROFILE_FIT_DEGREE,
     general_change_model_path: str | Path | None = None,
     interesting_pc4_threshold: float | None = None,
     interesting_pc5_threshold: float | None = None,
@@ -1090,6 +1097,7 @@ def feature_cache_metadata(
         "door_profile_max_masked_fraction": float(door_profile_max_masked_fraction),
         "car_profile_rotate_cw_deg": float(car_profile_rotate_cw_deg),
         "car_profile_max_masked_fraction": float(car_profile_max_masked_fraction),
+        "car_profile_fit_degree": int(car_profile_fit_degree),
         "general_change_model": general_change_model_signature(general_change_model_path),
         "interesting_pc4_threshold": None if interesting_pc4_threshold is None else float(interesting_pc4_threshold),
         "interesting_pc5_threshold": None if interesting_pc5_threshold is None else float(interesting_pc5_threshold),
@@ -1115,6 +1123,7 @@ def load_feature_cache(
     door_profile_max_masked_fraction: float = DOOR_PROFILE_MAX_MASKED_FRACTION,
     car_profile_rotate_cw_deg: float = CAR_PROFILE_ROTATE_CW_DEG,
     car_profile_max_masked_fraction: float = CAR_PROFILE_MAX_MASKED_FRACTION,
+    car_profile_fit_degree: int = CAR_PROFILE_FIT_DEGREE,
     general_change_model_path: str | Path | None = None,
     interesting_pc4_threshold: float | None = None,
     interesting_pc5_threshold: float | None = None,
@@ -1127,6 +1136,7 @@ def load_feature_cache(
         door_profile_max_masked_fraction=door_profile_max_masked_fraction,
         car_profile_rotate_cw_deg=car_profile_rotate_cw_deg,
         car_profile_max_masked_fraction=car_profile_max_masked_fraction,
+        car_profile_fit_degree=car_profile_fit_degree,
         general_change_model_path=general_change_model_path,
         interesting_pc4_threshold=interesting_pc4_threshold,
         interesting_pc5_threshold=interesting_pc5_threshold,
@@ -1185,6 +1195,7 @@ def build_features(
     door_profile_max_masked_fraction: float = DOOR_PROFILE_MAX_MASKED_FRACTION,
     car_profile_rotate_cw_deg: float = CAR_PROFILE_ROTATE_CW_DEG,
     car_profile_max_masked_fraction: float = CAR_PROFILE_MAX_MASKED_FRACTION,
+    car_profile_fit_degree: int = CAR_PROFILE_FIT_DEGREE,
     general_change_model_path: str | Path | None = None,
     interesting_pc4_threshold: float | None = None,
     interesting_pc5_threshold: float | None = None,
@@ -1205,6 +1216,7 @@ def build_features(
         door_profile_max_masked_fraction=door_profile_max_masked_fraction,
         car_profile_rotate_cw_deg=car_profile_rotate_cw_deg,
         car_profile_max_masked_fraction=car_profile_max_masked_fraction,
+        car_profile_fit_degree=car_profile_fit_degree,
         general_change_model_path=general_change_model_path,
         interesting_pc4_threshold=interesting_pc4_threshold,
         interesting_pc5_threshold=interesting_pc5_threshold,
@@ -1232,6 +1244,7 @@ def build_features(
                 door_profile_max_masked_fraction=door_profile_max_masked_fraction,
                 car_profile_rotate_cw_deg=car_profile_rotate_cw_deg,
                 car_profile_max_masked_fraction=car_profile_max_masked_fraction,
+                car_profile_fit_degree=car_profile_fit_degree,
             )
         except Exception as exc:
             feature_failures.append({"path": row.path, "filename": row.filename, "timestamp": row.timestamp, "reason": str(exc)})
@@ -1354,6 +1367,7 @@ def state_from_config(config: Mapping[str, Any]) -> tuple[dict[str, Any], pd.Dat
         door_profile_max_masked_fraction=float(feature_config.get("door_profile_max_masked_fraction", DOOR_PROFILE_MAX_MASKED_FRACTION)),
         car_profile_rotate_cw_deg=float(feature_config.get("car_profile_rotate_cw_deg", CAR_PROFILE_ROTATE_CW_DEG)),
         car_profile_max_masked_fraction=float(feature_config.get("car_profile_max_masked_fraction", CAR_PROFILE_MAX_MASKED_FRACTION)),
+        car_profile_fit_degree=int(feature_config.get("car_profile_fit_degree", CAR_PROFILE_FIT_DEGREE)),
         general_change_model_path=general_change_config.get("model_path"),
         interesting_pc4_threshold=general_change_config.get("interesting_pc4_threshold"),
         interesting_pc5_threshold=general_change_config.get("interesting_pc5_threshold"),

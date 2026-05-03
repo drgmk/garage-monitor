@@ -431,6 +431,32 @@ def send_ntfy_notification(
         }
 
 
+def notification_enabled_for_event(
+    event: Mapping[str, Any],
+    notification_config: Mapping[str, Any],
+) -> tuple[bool, str | None]:
+    types = notification_config.get("types") or {}
+    if not types:
+        return True, None
+
+    badges = event.get("badges") or []
+    keys = [str(badge.get("key", "")).strip() for badge in badges if badge.get("key")]
+    if not keys:
+        kind = str(event.get("kind", "")).strip()
+        if kind == "scheduled_check":
+            keys = ["check"]
+        elif kind == "image_event":
+            keys = ["image"]
+
+    if not keys:
+        return True, None
+
+    enabled_keys = [key for key in keys if bool(types.get(key, True))]
+    if enabled_keys:
+        return True, None
+    return False, f"notification types disabled for event badges: {', '.join(keys)}"
+
+
 def send_notification(
     event: Mapping[str, Any],
     state: Mapping[str, Any],

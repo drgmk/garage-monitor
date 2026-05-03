@@ -9,6 +9,7 @@ features:
   door_profile_rotate_cw_deg: -1.0
   car_profile_rotate_cw_deg: 40.0
   car_profile_max_masked_fraction: 0.25
+  car_profile_fit_degree: 2
   door_profile_max_masked_fraction: 0.25
 general_change:
   model_path: garage_general_pca.pkl
@@ -46,7 +47,7 @@ conclusions:
     threshold: 110.0
     higher_means_true: false
   car_present:
-    feature: car_line_resid_ssq
+    feature: car_poly_resid_ssq
     threshold: 600.0
     higher_means_true: true
   interesting_image:
