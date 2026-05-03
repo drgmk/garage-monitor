@@ -89,7 +89,7 @@ automation:
         message: Car is back in the garage.
   interesting_image_event:
     enabled: true
-    message: Interesting garage image detected.
+    message: Abnormal image detected.
   scheduled_checks:
   - name: garage_open_evening
     at: '20:00'
@@ -97,4 +97,4 @@ automation:
     condition:
       garage_door_open: true
     message: Garage door is still open.
-  recent_events_limit: 5
+  recent_events_limit: 10

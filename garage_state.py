@@ -599,7 +599,7 @@ def render_status_html(status_doc: Mapping[str, Any]) -> str:
     <section class="status">
       <div class="tile {door_class}"><div class="label">Garage door</div><div class="value">{html.escape(door)}</div></div>
       <div class="tile {car_class}"><div class="label">Car</div><div class="value">{html.escape(car)}</div></div>
-      <div class="tile {interesting_class}"><div class="label">Image</div><div class="value">{html.escape(interesting)}</div></div>
+    #   <div class="tile {interesting_class}"><div class="label">Image</div><div class="value">{html.escape(interesting)}</div></div>
     </section>
     {image_section}
     <h2>Recent Events</h2>
