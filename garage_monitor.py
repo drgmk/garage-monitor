@@ -60,7 +60,7 @@ DOOR_PROFILE_MAX_MASKED_FRACTION = 0.25
 CAR_PROFILE_ROTATE_CW_DEG = 40.0
 CAR_PROFILE_MAX_MASKED_FRACTION = 0.25
 CAR_PROFILE_FIT_DEGREE = 2
-FEATURE_CACHE_SCHEMA_VERSION = 9
+FEATURE_CACHE_SCHEMA_VERSION = 10
 
 BIN_CACHE_WARNINGS: list[dict[str, Any]] = []
 BIN_CACHE_HITS = 0
@@ -651,7 +651,6 @@ def general_change_model_signature(model_path: str | Path | None) -> dict[str, A
     return {
         "path": signature_path,
         "exists": True,
-        "mtime_ns": int(stat.st_mtime_ns),
         "size": int(stat.st_size),
     }
 
