@@ -609,7 +609,7 @@ def render_status_html(status_doc: Mapping[str, Any]) -> str:
 </html>
 """
 
-def update_status(config_path: Path, mode: str = "all") -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Path]]:
+def update_status(config_path: Path, mode: str = "all", verbose: bool = False) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Path]]:
     config = gm.load_config(config_path)
     base_dir = config_path.parent
     auto = automation_config(config)
@@ -624,7 +624,7 @@ def update_status(config_path: Path, mode: str = "all") -> tuple[dict[str, Any],
     now = datetime.now()
     previous_doc = read_json(paths["state"], default={})
     previous_state = previous_doc.get("state")
-    current_state, _, _ = gm.state_from_config(config)
+    current_state, _, _ = gm.state_from_config(config, verbose=verbose)
     current_state = resolve_indeterminate_state(previous_state, current_state)
 
     raw_events = []
@@ -680,9 +680,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default=Path(__file__).with_name("garage_config.yml"), help="Path to YAML config")
     parser.add_argument("--mode", choices=["all", "transitions", "scheduled"], default="all")
     parser.add_argument("--format", choices=["json", "text"], default="text")
+    parser.add_argument("--verbose", action="store_true", help="Emit lightweight progress logging to stderr")
     args = parser.parse_args(argv)
 
-    status_doc, events, paths = update_status(Path(args.config).expanduser(), mode=args.mode)
+    status_doc, events, paths = update_status(Path(args.config).expanduser(), mode=args.mode, verbose=args.verbose)
 
     if args.format == "json":
         print(json.dumps(gm.json_ready({"status": status_doc, "events": events, "paths": paths}), indent=2, sort_keys=True))

@@ -67,6 +67,15 @@ BIN_CACHE_HITS = 0
 BIN_CACHE_MISSES = 0
 
 
+def emit_log(log: Any, message: str) -> None:
+    if log is not None:
+        log(message)
+
+
+def default_logger(message: str) -> None:
+    print(f"[garage_monitor] {message}", file=sys.stderr)
+
+
 @dataclass(frozen=True)
 class ThresholdRule:
     feature: str
@@ -1337,6 +1346,7 @@ def build_features(
     interesting_pc4_threshold: float | None = None,
     interesting_pc5_threshold: float | None = None,
     car_cluster_model_path: str | Path | None = None,
+    log: Any = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     global BIN_CACHE_HITS, BIN_CACHE_MISSES, BIN_CACHE_WARNINGS
 
@@ -1344,6 +1354,7 @@ def build_features(
         raise ValueError("No image records available")
 
     work = images if max_images is None else images.iloc[:max_images]
+    emit_log(log, f"feature cache: loading metadata/cache for {len(work)} images")
     cached_features, feature_cache_path, feature_meta_path, feature_meta, feature_cache_status = load_feature_cache(
         data_path,
         rois,
@@ -1365,6 +1376,7 @@ def build_features(
     work["image_key"] = work["filename"].astype(str)
     cached_keys = set(cached_features["image_key"].astype(str)) if not cached_features.empty else set()
     new_work = work[~work["image_key"].isin(cached_keys)].copy()
+    emit_log(log, f"feature cache status={feature_cache_status}; cached_rows={len(cached_features)}; missing_rows={len(new_work)}")
 
     BIN_CACHE_HITS = 0
     BIN_CACHE_MISSES = 0
@@ -1372,6 +1384,8 @@ def build_features(
 
     feature_rows = []
     feature_failures = []
+    if len(new_work) > 0:
+        emit_log(log, f"extracting ROI features for {len(new_work)} images")
     for _, row in new_work.iterrows():
         try:
             stats = roi_stats_for_image(
@@ -1400,9 +1414,11 @@ def build_features(
         feature_rows.append(stats)
 
     new_features = pd.DataFrame(feature_rows)
+    emit_log(log, f"feature extraction complete: rows={len(new_features)} failures={len(feature_failures)}")
     general_change_model = load_general_change_model(general_change_model_path)
     car_cluster_model = load_cluster_case_model(car_cluster_model_path)
     if general_change_model is not None and not new_features.empty:
+        emit_log(log, f"projecting general PCA model for {len(new_features)} new images")
         projected = project_general_change_rows(
             new_features[["image_key", "path"]],
             general_change_model,
@@ -1412,6 +1428,7 @@ def build_features(
             new_features = new_features.merge(projected, on="image_key", how="left")
 
     if car_cluster_model is not None and not new_features.empty:
+        emit_log(log, f"projecting car cluster model for {len(new_features)} new images")
         projected = project_car_cluster_rows(
             new_features[["image_key", "path"]],
             car_cluster_model,
@@ -1442,6 +1459,7 @@ def build_features(
     if features.empty:
         raise ValueError("No features were available. Check image readability, feature cache, and ROI definitions.")
 
+    emit_log(log, f"saving feature cache: rows={len(features)} path={feature_cache_path}")
     save_feature_cache(features, feature_cache_path, feature_meta_path, feature_meta)
     feature_cache_warning = None
     if feature_cache_status != "loaded" and len(cached_features) == 0 and len(work) > 0:
@@ -1500,8 +1518,13 @@ def evaluate_row(row: pd.Series, rules: Mapping[str, ThresholdRule]) -> dict[str
     return conclusions
 
 
-def state_from_config(config: Mapping[str, Any]) -> tuple[dict[str, Any], pd.DataFrame, dict[str, Any]]:
+def state_from_config(config: Mapping[str, Any],
+    verbose: bool = False,
+    log: Any = None,
+) -> tuple[dict[str, Any], pd.DataFrame, dict[str, Any]]:
     data_path = config["data_path"]
+    if verbose and log is None:
+        log = default_logger
     bin_factor = config.get("bin_factor", 4)
     cache_dir_name = config.get("cache_dir_name", DEFAULT_CACHE_DIR_NAME)
     discovery_config = config.get("image_discovery", {})
@@ -1509,12 +1532,15 @@ def state_from_config(config: Mapping[str, Any]) -> tuple[dict[str, Any], pd.Dat
     general_change_config = config.get("general_change", {}) or {}
     car_cluster_config = config.get("car_cluster", {}) or {}
 
+    emit_log(log, f"discovering images under {data_path}")
     images, discovery_info = discover_images(
         data_path,
         bin_factor=bin_factor,
         force_rescan=bool(discovery_config.get("force_rescan_images", False)),
         cache_dir_name=cache_dir_name,
     )
+    emit_log(log, f"discovery complete: total_image_records={discovery_info.get('total_image_records')} new_readable_source_images={discovery_info.get('new_readable_source_images')}")
+    emit_log(log, "building/loading features")
     features, feature_info = build_features(
         images,
         config["rois"],
@@ -1532,10 +1558,13 @@ def state_from_config(config: Mapping[str, Any]) -> tuple[dict[str, Any], pd.Dat
         interesting_pc4_threshold=general_change_config.get("interesting_pc4_threshold"),
         interesting_pc5_threshold=general_change_config.get("interesting_pc5_threshold"),
         car_cluster_model_path=car_cluster_config.get("model_path"),
+        log=log,
     )
+    emit_log(log, f"features ready: total_rows={len(features)} cache_status={feature_info.get('feature_cache_status')}")
     row = latest_feature_row(features)
     rules = threshold_rules_from_config(config)
     conclusions = evaluate_row(row, rules)
+    emit_log(log, f"evaluated latest row: filename={row['filename']} timestamp={pd.to_datetime(row['timestamp']).isoformat()}")
 
     state = {
         "timestamp": pd.to_datetime(row["timestamp"]).isoformat(),
@@ -1580,10 +1609,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default=Path(__file__).with_name("garage_config.yml"), help="Path to YAML config")
     parser.add_argument("--format", choices=["json", "env", "text"], default="json", help="Output format")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+    parser.add_argument("--verbose", action="store_true", help="Emit lightweight progress logging to stderr")
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
-    state, _, info = state_from_config(config)
+    state, _, info = state_from_config(config, verbose=args.verbose)
 
     feature_warning = info.get("features", {}).get("feature_cache_warning")
     if feature_warning:
