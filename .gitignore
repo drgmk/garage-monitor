@@ -5,6 +5,7 @@ __pycache__/
 # specific to this project
 garage*.png
 *ipynb
+*_table.pkl
 
 # Generated runtime state.
 garage_status.json

@@ -59,7 +59,7 @@ DOOR_PROFILE_MAX_MASKED_FRACTION = 0.25
 CAR_PROFILE_ROTATE_CW_DEG = 40.0
 CAR_PROFILE_MAX_MASKED_FRACTION = 0.25
 CAR_PROFILE_FIT_DEGREE = 2
-FEATURE_CACHE_SCHEMA_VERSION = 7
+FEATURE_CACHE_SCHEMA_VERSION = 8
 
 BIN_CACHE_WARNINGS: list[dict[str, Any]] = []
 BIN_CACHE_HITS = 0
@@ -155,10 +155,7 @@ def load_cached_image_records(
     out["filename"] = cached["filename"].astype(str)
     out["image_key"] = cached.get("image_key", out["filename"]).astype(str)
 
-    if "path" in cached.columns:
-        out["path"] = cached["path"].map(Path)
-    else:
-        out["path"] = out["filename"].map(lambda name: Path(data_path) / name)
+    out["path"] = out["filename"].map(lambda name: Path(data_path) / name)
 
     if "timestamp" in cached.columns:
         timestamps = pd.to_datetime(cached["timestamp"])
@@ -1302,15 +1299,15 @@ def load_feature_cache(
         else:
             return pd.DataFrame(), cache_path, meta_path, expected_meta, "missing key"
 
-    if "path" in cached.columns:
-        cached = cached.copy()
-        cached["path"] = cached["path"].map(Path)
+    cached = cached.copy()
+    cached["path"] = cached["filename"].astype(str).map(lambda name: Path(data_path) / name)
 
     return cached, cache_path, meta_path, expected_meta, "loaded"
 
 def save_feature_cache(features: pd.DataFrame, cache_path: Path, meta_path: Path, metadata: Mapping[str, Any]) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    features.to_pickle(cache_path)
+    cache_features = features.drop(columns=["path"], errors="ignore").copy()
+    cache_features.to_pickle(cache_path)
     meta = dict(metadata)
     meta["updated_at"] = datetime.now().isoformat(timespec="seconds")
     meta["rows"] = int(len(features))
