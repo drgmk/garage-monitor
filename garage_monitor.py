@@ -59,7 +59,7 @@ DOOR_PROFILE_MAX_MASKED_FRACTION = 0.25
 CAR_PROFILE_ROTATE_CW_DEG = 40.0
 CAR_PROFILE_MAX_MASKED_FRACTION = 0.25
 CAR_PROFILE_FIT_DEGREE = 2
-FEATURE_CACHE_SCHEMA_VERSION = 8
+FEATURE_CACHE_SCHEMA_VERSION = 9
 
 BIN_CACHE_WARNINGS: list[dict[str, Any]] = []
 BIN_CACHE_HITS = 0
@@ -630,11 +630,16 @@ def general_change_model_signature(model_path: str | Path | None) -> dict[str, A
     if not model_path:
         return None
     path = Path(model_path)
+    repo_base = Path(__file__).resolve().parent
+    try:
+        signature_path = str(path.resolve().relative_to(repo_base))
+    except Exception:
+        signature_path = str(path)
     if not path.exists():
-        return {"path": str(path), "exists": False}
+        return {"path": signature_path, "exists": False}
     stat = path.stat()
     return {
-        "path": str(path.resolve()),
+        "path": signature_path,
         "exists": True,
         "mtime_ns": int(stat.st_mtime_ns),
         "size": int(stat.st_size),
