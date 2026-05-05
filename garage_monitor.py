@@ -6,6 +6,7 @@ import argparse
 import json
 import pickle
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1442,8 +1443,16 @@ def build_features(
         raise ValueError("No features were available. Check image readability, feature cache, and ROI definitions.")
 
     save_feature_cache(features, feature_cache_path, feature_meta_path, feature_meta)
+    feature_cache_warning = None
+    if feature_cache_status != "loaded" and len(cached_features) == 0 and len(work) > 0:
+        feature_cache_warning = (
+            f"Feature cache is being rebuilt from scratch: {feature_cache_status}. "
+            f"cache={feature_cache_path} images={len(work)}"
+        )
+
     info = {
         "feature_cache_status": feature_cache_status,
+        "feature_cache_warning": feature_cache_warning,
         "feature_cache_path": feature_cache_path,
         "cached_feature_rows": len(cached_features),
         "images_needing_feature_extraction": len(new_work),
@@ -1574,7 +1583,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
-    state, _, _ = state_from_config(config)
+    state, _, info = state_from_config(config)
+
+    feature_warning = info.get("features", {}).get("feature_cache_warning")
+    if feature_warning:
+        print(f"WARNING: {feature_warning}", file=sys.stderr)
 
     if args.format == "json":
         print(json.dumps(json_ready(state), indent=2 if args.pretty else None, sort_keys=True))
