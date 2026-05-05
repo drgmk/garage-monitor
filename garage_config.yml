@@ -15,6 +15,8 @@ general_change:
   model_path: garage_general_pca.pkl
   interesting_pc4_threshold: -26.0
   interesting_pc5_threshold: -50.0
+car_cluster:
+  model_path: garage_car_pca_cluster_cases.pkl
 rois:
   door:
   - 502
@@ -31,11 +33,11 @@ rois:
   - 460
   - 1020
   - 350
-  car_window:
-  - 80
+  car:
+  - 0
+  - 200
   - 400
-  - 180
-  - 480
+  - 640
   car_door:
   - 100
   - 500
@@ -47,8 +49,8 @@ conclusions:
     threshold: 110.0
     higher_means_true: false
   car_present:
-    feature: car_poly_resid_ssq
-    threshold: 600.0
+    feature: car_cluster_present_flag
+    threshold: 0.5
     higher_means_true: true
   interesting_image:
     feature: interesting_image_flag
@@ -88,7 +90,7 @@ automation:
         enabled: true
         message: Car is back in the garage.
   interesting_image_event:
-    enabled: true
+    enabled: false
     message: Abnormal image detected.
   scheduled_checks:
   - name: garage_open_evening

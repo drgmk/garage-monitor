@@ -31,6 +31,7 @@ def rebuild_timeline(config_path: Path, mode: str = "all") -> tuple[dict[str, An
     discovery_config = config.get("image_discovery", {})
     feature_config = config.get("features", {})
     general_change_config = config.get("general_change", {}) or {}
+    car_cluster_config = config.get("car_cluster", {}) or {}
 
     images, discovery_info = gm.discover_images(
         config["data_path"],
@@ -50,9 +51,11 @@ def rebuild_timeline(config_path: Path, mode: str = "all") -> tuple[dict[str, An
         door_profile_max_masked_fraction=float(feature_config.get("door_profile_max_masked_fraction", gm.DOOR_PROFILE_MAX_MASKED_FRACTION)),
         car_profile_rotate_cw_deg=float(feature_config.get("car_profile_rotate_cw_deg", gm.CAR_PROFILE_ROTATE_CW_DEG)),
         car_profile_max_masked_fraction=float(feature_config.get("car_profile_max_masked_fraction", gm.CAR_PROFILE_MAX_MASKED_FRACTION)),
+        car_profile_fit_degree=int(feature_config.get("car_profile_fit_degree", gm.CAR_PROFILE_FIT_DEGREE)),
         general_change_model_path=general_change_config.get("model_path"),
         interesting_pc4_threshold=general_change_config.get("interesting_pc4_threshold"),
         interesting_pc5_threshold=general_change_config.get("interesting_pc5_threshold"),
+        car_cluster_model_path=car_cluster_config.get("model_path"),
     )
     features = features.sort_values("timestamp").reset_index(drop=True)
     rules = gm.threshold_rules_from_config(config)

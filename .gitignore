@@ -12,6 +12,7 @@ garage_status.html
 garage_latest_binned.png
 garage_events.jsonl
 garage_notifications.jsonl
+garage_annotations.jsonl
 garage_cron.log
 
 # Image and feature caches.

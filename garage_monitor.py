@@ -59,7 +59,7 @@ DOOR_PROFILE_MAX_MASKED_FRACTION = 0.25
 CAR_PROFILE_ROTATE_CW_DEG = 40.0
 CAR_PROFILE_MAX_MASKED_FRACTION = 0.25
 CAR_PROFILE_FIT_DEGREE = 2
-FEATURE_CACHE_SCHEMA_VERSION = 6
+FEATURE_CACHE_SCHEMA_VERSION = 7
 
 BIN_CACHE_WARNINGS: list[dict[str, Any]] = []
 BIN_CACHE_HITS = 0
@@ -94,6 +94,11 @@ def load_config(path: str | Path) -> dict[str, Any]:
         model_path = Path(general_change["model_path"]).expanduser()
         general_change["model_path"] = model_path if model_path.is_absolute() else base_dir / model_path
     config["general_change"] = general_change
+    car_cluster = dict(config.get("car_cluster", {}) or {})
+    if car_cluster.get("model_path"):
+        model_path = Path(car_cluster["model_path"]).expanduser()
+        car_cluster["model_path"] = model_path if model_path.is_absolute() else base_dir / model_path
+    config["car_cluster"] = car_cluster
     return config
 
 def cache_dir(data_path: str | Path, cache_dir_name: str = DEFAULT_CACHE_DIR_NAME) -> Path:
@@ -557,6 +562,7 @@ def vectorize_image_for_general_change(
     *,
     bin_factor: int = 4,
     cache_dir_name: str = DEFAULT_CACHE_DIR_NAME,
+    roi: tuple[int, int, int, int] | list[int] | None = None,
     spatial_downsample: int = 8,
     preprocess_mode: str = "none",
     preprocess_sigma: float = 2.0,
@@ -565,6 +571,8 @@ def vectorize_image_for_general_change(
 ) -> np.ndarray:
     img = load_luma(path, bin_factor=bin_factor, cache_dir_name=cache_dir_name)
     img, _ = mask_banded_rows(img)
+    if roi is not None:
+        img = roi_crop(img, roi)
     img = preprocess_structure_image(
         img,
         mode=preprocess_mode,
@@ -584,20 +592,35 @@ def vectorize_image_for_general_change(
 
 
 def vectorize_image_for_general_change_job(args: tuple[Any, ...]) -> np.ndarray:
-    (
-        path,
-        bin_factor,
-        cache_dir_name,
-        spatial_downsample,
-        preprocess_mode,
-        preprocess_sigma,
-        preprocess_amount,
-        clip_preprocessed,
-    ) = args
+    if len(args) == 8:
+        (
+            path,
+            bin_factor,
+            cache_dir_name,
+            spatial_downsample,
+            preprocess_mode,
+            preprocess_sigma,
+            preprocess_amount,
+            clip_preprocessed,
+        ) = args
+        roi = None
+    else:
+        (
+            path,
+            bin_factor,
+            cache_dir_name,
+            roi,
+            spatial_downsample,
+            preprocess_mode,
+            preprocess_sigma,
+            preprocess_amount,
+            clip_preprocessed,
+        ) = args
     return vectorize_image_for_general_change(
         path,
         bin_factor=bin_factor,
         cache_dir_name=cache_dir_name,
+        roi=roi,
         spatial_downsample=spatial_downsample,
         preprocess_mode=preprocess_mode,
         preprocess_sigma=preprocess_sigma,
@@ -644,6 +667,112 @@ def load_general_change_model(model_path: str | Path | None) -> dict[str, Any] |
     return dict(model)
 
 
+def cluster_case_model_signature(model_path: str | Path | None) -> dict[str, Any] | None:
+    return general_change_model_signature(model_path)
+
+
+def load_cluster_case_model(model_path: str | Path | None) -> dict[str, Any] | None:
+    if not model_path:
+        return None
+    path = Path(model_path)
+    if not path.exists():
+        return None
+    with path.open("rb") as handle:
+        model = pickle.load(handle)
+    required = {"scaler", "pca", "cluster_model", "cluster_pc_cols", "cluster_case_map", "vector_bin_factor", "spatial_downsample", "preprocess_mode", "preprocess_sigma", "preprocess_amount", "clip_preprocessed"}
+    missing = required.difference(model)
+    if missing:
+        raise ValueError(f"Car cluster model missing keys: {sorted(missing)}")
+
+    cluster_model = model.get("cluster_model")
+    if cluster_model is not None and hasattr(cluster_model, "cluster_centers_"):
+        cluster_model.cluster_centers_ = np.asarray(
+            cluster_model.cluster_centers_,
+            dtype=np.float64,
+            order="C",
+        )
+
+    return dict(model)
+
+
+def cluster_case_from_id(cluster_id: int, cluster_case_map: Mapping[Any, Any] | None) -> str | None:
+    if not cluster_case_map:
+        return None
+    if all(isinstance(v, str) for v in cluster_case_map.values()):
+        return cluster_case_map.get(str(cluster_id)) or cluster_case_map.get(cluster_id)
+    for case_name, cluster_ids in cluster_case_map.items():
+        if isinstance(cluster_ids, (list, tuple, set)) and cluster_id in {int(v) for v in cluster_ids}:
+            return str(case_name)
+    return None
+
+
+def project_car_cluster_rows(
+    rows: pd.DataFrame,
+    model: Mapping[str, Any] | None,
+    cache_dir_name: str = DEFAULT_CACHE_DIR_NAME,
+) -> pd.DataFrame:
+    if model is None or rows.empty:
+        return pd.DataFrame()
+
+    scaler = model["scaler"]
+    pca = model["pca"]
+    cluster_model = model["cluster_model"]
+    cluster_pc_cols = [str(v) for v in model.get("cluster_pc_cols", [])]
+    expected_size = model.get("vector_size")
+    projection_rows: list[dict[str, Any]] = []
+
+    for row in rows.itertuples():
+        compact = vectorize_image_for_general_change(
+            row.path,
+            bin_factor=int(model.get("vector_bin_factor", 4)),
+            cache_dir_name=cache_dir_name,
+            roi=model.get("roi"),
+            spatial_downsample=int(model.get("spatial_downsample", 8)),
+            preprocess_mode=str(model.get("preprocess_mode", "none")),
+            preprocess_sigma=float(model.get("preprocess_sigma", 2.0)),
+            preprocess_amount=float(model.get("preprocess_amount", 1.0)),
+            clip_preprocessed=bool(model.get("clip_preprocessed", True)),
+        )
+        x_raw = compact.reshape(1, -1)
+        if expected_size is not None and x_raw.shape[1] != int(expected_size):
+            raise ValueError(
+                f"Vector size mismatch for {row.path}: got {x_raw.shape[1]}, expected {expected_size}"
+            )
+        row_median = float(np.median(x_raw, axis=1)[0])
+        x_centered = x_raw - row_median
+        x_scaled = scaler.transform(x_centered)
+        z = pca.transform(x_scaled)[0]
+
+        cluster_features: list[float] = []
+        for col in cluster_pc_cols:
+            if col == "global_luma_median":
+                cluster_features.append(row_median)
+            elif col.startswith("pc") and col[2:].isdigit():
+                idx = int(col[2:]) - 1
+                if idx < 0 or idx >= len(z):
+                    raise ValueError(f"Cluster column {col} out of range for projected PCA size {len(z)}")
+                cluster_features.append(float(z[idx]))
+            else:
+                raise ValueError(f"Unsupported cluster feature column: {col}")
+
+        cluster_vector = np.asarray(cluster_features, dtype=np.float64, order="C").reshape(1, -1)
+        cluster_id = int(cluster_model.predict(cluster_vector)[0])
+        cluster_case = cluster_case_from_id(cluster_id, model.get("cluster_case_map")) or "ordinary"
+        record = {
+            "image_key": str(row.image_key),
+            "car_cluster_id": cluster_id,
+            "car_cluster_case": cluster_case,
+            "car_cluster_present_flag": 0.0 if cluster_case == "car_absent" else 1.0,
+            "car_cluster_absent_flag": 1.0 if cluster_case == "car_absent" else 0.0,
+            "car_cluster_global_luma_median": row_median,
+        }
+        for idx, value in enumerate(z, start=1):
+            record[f"car_cluster_pc{idx}"] = float(value)
+        projection_rows.append(record)
+
+    return pd.DataFrame(projection_rows)
+
+
 def project_general_change_rows(
     rows: pd.DataFrame,
     model: Mapping[str, Any] | None,
@@ -662,6 +791,7 @@ def project_general_change_rows(
             row.path,
             bin_factor=int(model.get("vector_bin_factor", 4)),
             cache_dir_name=cache_dir_name,
+            roi=model.get("roi"),
             spatial_downsample=int(model.get("spatial_downsample", 8)),
             preprocess_mode=str(model.get("preprocess_mode", "none")),
             preprocess_sigma=float(model.get("preprocess_sigma", 2.0)),
@@ -1088,6 +1218,7 @@ def feature_cache_metadata(
     general_change_model_path: str | Path | None = None,
     interesting_pc4_threshold: float | None = None,
     interesting_pc5_threshold: float | None = None,
+    car_cluster_model_path: str | Path | None = None,
 ) -> dict[str, Any]:
     return {
         "bin_factor": int(bin_factor) if bin_factor is not None else None,
@@ -1099,6 +1230,7 @@ def feature_cache_metadata(
         "car_profile_max_masked_fraction": float(car_profile_max_masked_fraction),
         "car_profile_fit_degree": int(car_profile_fit_degree),
         "general_change_model": general_change_model_signature(general_change_model_path),
+        "car_cluster_model": cluster_case_model_signature(car_cluster_model_path),
         "interesting_pc4_threshold": None if interesting_pc4_threshold is None else float(interesting_pc4_threshold),
         "interesting_pc5_threshold": None if interesting_pc5_threshold is None else float(interesting_pc5_threshold),
     }
@@ -1127,6 +1259,7 @@ def load_feature_cache(
     general_change_model_path: str | Path | None = None,
     interesting_pc4_threshold: float | None = None,
     interesting_pc5_threshold: float | None = None,
+    car_cluster_model_path: str | Path | None = None,
 ) -> tuple[pd.DataFrame, Path, Path, dict[str, Any], str]:
     cache_path, meta_path = feature_cache_paths(data_path, bin_factor, cache_dir_name)
     expected_meta = feature_cache_metadata(
@@ -1140,6 +1273,7 @@ def load_feature_cache(
         general_change_model_path=general_change_model_path,
         interesting_pc4_threshold=interesting_pc4_threshold,
         interesting_pc5_threshold=interesting_pc5_threshold,
+        car_cluster_model_path=car_cluster_model_path,
     )
 
     if force or not cache_path.exists():
@@ -1199,6 +1333,7 @@ def build_features(
     general_change_model_path: str | Path | None = None,
     interesting_pc4_threshold: float | None = None,
     interesting_pc5_threshold: float | None = None,
+    car_cluster_model_path: str | Path | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     global BIN_CACHE_HITS, BIN_CACHE_MISSES, BIN_CACHE_WARNINGS
 
@@ -1220,6 +1355,7 @@ def build_features(
         general_change_model_path=general_change_model_path,
         interesting_pc4_threshold=interesting_pc4_threshold,
         interesting_pc5_threshold=interesting_pc5_threshold,
+        car_cluster_model_path=car_cluster_model_path,
     )
 
     work = work.copy()
@@ -1262,10 +1398,20 @@ def build_features(
 
     new_features = pd.DataFrame(feature_rows)
     general_change_model = load_general_change_model(general_change_model_path)
+    car_cluster_model = load_cluster_case_model(car_cluster_model_path)
     if general_change_model is not None and not new_features.empty:
         projected = project_general_change_rows(
             new_features[["image_key", "path"]],
             general_change_model,
+            cache_dir_name=cache_dir_name,
+        )
+        if not projected.empty:
+            new_features = new_features.merge(projected, on="image_key", how="left")
+
+    if car_cluster_model is not None and not new_features.empty:
+        projected = project_car_cluster_rows(
+            new_features[["image_key", "path"]],
+            car_cluster_model,
             cache_dir_name=cache_dir_name,
         )
         if not projected.empty:
@@ -1307,6 +1453,8 @@ def build_features(
         "feature_failures": feature_failures,
         "general_change_model_path": None if general_change_model_path is None else str(general_change_model_path),
         "general_change_model_loaded": bool(general_change_model is not None),
+        "car_cluster_model_path": None if car_cluster_model_path is None else str(car_cluster_model_path),
+        "car_cluster_model_loaded": bool(car_cluster_model is not None),
     }
     return features, info
 
@@ -1348,6 +1496,7 @@ def state_from_config(config: Mapping[str, Any]) -> tuple[dict[str, Any], pd.Dat
     discovery_config = config.get("image_discovery", {})
     feature_config = config.get("features", {})
     general_change_config = config.get("general_change", {}) or {}
+    car_cluster_config = config.get("car_cluster", {}) or {}
 
     images, discovery_info = discover_images(
         data_path,
@@ -1371,6 +1520,7 @@ def state_from_config(config: Mapping[str, Any]) -> tuple[dict[str, Any], pd.Dat
         general_change_model_path=general_change_config.get("model_path"),
         interesting_pc4_threshold=general_change_config.get("interesting_pc4_threshold"),
         interesting_pc5_threshold=general_change_config.get("interesting_pc5_threshold"),
+        car_cluster_model_path=car_cluster_config.get("model_path"),
     )
     row = latest_feature_row(features)
     rules = threshold_rules_from_config(config)
